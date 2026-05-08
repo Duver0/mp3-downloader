@@ -792,7 +792,7 @@ def run_sync(retry_failed: bool = False):
                 state.mark_failed(track["id"], f"unexpected: {e}")
                 return result
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(process_one, track): track for track in songs}
             for future in as_completed(futures):
                 if sync.should_stop:
