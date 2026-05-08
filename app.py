@@ -50,6 +50,45 @@ log.addHandler(_h)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 
+# ─── YouTube Search Cache ──────────────────────────────────────────────────
+class YoutubeSearchCache:
+    def __init__(self, path: Path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._data = self._load()
+
+    def _load(self) -> dict:
+        if self.path.exists():
+            try:
+                return json.loads(self.path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                log.warning(f"cache corrupted, starting fresh: {self.path}")
+                return {}
+        return {}
+
+    def _save_unlocked(self):
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._data, indent=2, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(self.path)
+
+    def get(self, artist: str, name: str) -> Optional[dict]:
+        key = f"{artist}|{name}".strip("|")
+        with self._lock:
+            return self._data.get(key)
+
+    def set(self, artist: str, name: str, video: dict) -> None:
+        key = f"{artist}|{name}".strip("|")
+        with self._lock:
+            self._data[key] = {
+                "id": video.get("id"),
+                "title": video.get("title"),
+                "duration": video.get("duration"),
+                "url": video.get("url"),
+            }
+            self._save_unlocked()
+
+
 # ─── Config persistence ─────────────────────────────────────────────────────
 def load_config() -> dict:
     if CONFIG_PATH.exists():
@@ -134,6 +173,7 @@ class State:
             self._save_unlocked()
 
 state = State(STATE_PATH)
+youtube_cache = YoutubeSearchCache(DATA_DIR / "youtube_cache.json")
 
 
 # ─── Sync orchestrator ──────────────────────────────────────────────────────
@@ -185,6 +225,17 @@ class SyncManager:
 
     def emit_status(self):
         self.emit("status", self.snapshot())
+
+    def increment_ok(self):
+        with self._lock: self.ok += 1
+    def increment_failed(self):
+        with self._lock: self.failed += 1
+    def increment_skipped(self):
+        with self._lock: self.skipped += 1
+    def add_processed(self, n: int):
+        with self._lock: self.processed += n
+    def set_current(self, label: str):
+        with self._lock: self.current = label
 
 sync = SyncManager()
 
@@ -400,7 +451,13 @@ def score_match(video: dict, track: dict) -> float:
 def find_best(track: dict, retry_name_only: bool = False) -> Optional[dict]:
     artist = track["artists"][0] if track["artists"] else ""
     name = track["name"]
-    
+
+    # Check cache first (before search)
+    if not retry_name_only and artist and name:
+        cached = youtube_cache.get(artist, name)
+        if cached:
+            return cached
+
     queries = []
     if not retry_name_only and artist and name:
         queries.append(f"{artist} {name}".strip())
@@ -412,7 +469,7 @@ def find_best(track: dict, retry_name_only: bool = False) -> Optional[dict]:
         queries.append(f"{name} audio".strip())
     if name:
         queries.append(f"{name} official audio".strip())
-    
+
     seen, candidates = set(), []
     for q in queries:
         if not q: continue
@@ -436,7 +493,13 @@ def find_best(track: dict, retry_name_only: bool = False) -> Optional[dict]:
     scored = sorted(((score_match(c, track), c) for c in candidates),
                     key=lambda x: x[0], reverse=True)
     best_s, best = scored[0]
-    return best if best_s >= 20 else None
+    result = best if best_s >= 20 else None
+
+    # Store in cache if found
+    if result and not retry_name_only and artist and name:
+        youtube_cache.set(artist, name, result)
+
+    return result
 
 
 def download_audio(video: dict, out_no_ext: Path,
@@ -719,24 +782,45 @@ def run_sync(retry_failed: bool = False):
 
         sync.emit_log(f"🚀 Descargando a: {dest}", "info")
 
-        for track in songs:
+        def process_one(track):
             if sync.should_stop:
-                sync.emit_log("⏹  Detenido por el usuario.", "warn")
-                break
+                return None
             try:
-                result = process_track(track, dest, audio_format, audio_quality)
+                return process_track(track, dest, audio_format, audio_quality)
             except Exception as e:
                 result = f"FAIL [unexpected] {track.get('name','?')}: {e}"
                 state.mark_failed(track["id"], f"unexpected: {e}")
+                return result
 
-            if result.startswith("OK"):
-                sync.ok += 1; sync.emit_log(f"  ✓ {result[3:]}", "success")
-            elif result.startswith("SKIP"):
-                sync.skipped += 1; sync.emit_log(f"  ↷ {result[5:]}", "muted")
-            else:
-                sync.failed += 1; sync.emit_log(f"  ✗ {result[5:]}", "error")
-            sync.processed = sync.ok + sync.failed + sync.skipped
-            sync.emit_status()
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(process_one, track): track for track in songs}
+            for future in as_completed(futures):
+                if sync.should_stop:
+                    sync.emit_log("⏹  Detenido por el usuario.", "warn")
+                    break
+                try:
+                    result = future.result()
+                except Exception as e:
+                    track = futures[future]
+                    result = f"FAIL [unexpected] {track.get('name','?')}: {e}"
+                    state.mark_failed(track["id"], f"unexpected: {e}")
+
+                if result is None:
+                    continue
+
+                if result.startswith("OK"):
+                    sync.increment_ok()
+                    sync.emit_log(f"  ✓ {result[3:]}", "success")
+                elif result.startswith("SKIP"):
+                    sync.increment_skipped()
+                    sync.emit_log(f"  ↷ {result[5:]}", "muted")
+                else:
+                    sync.increment_failed()
+                    sync.emit_log(f"  ✗ {result[5:]}", "error")
+
+                with sync._lock:
+                    sync.processed = sync.ok + sync.failed + sync.skipped
+                sync.emit_status()
 
         sync.emit_log(f"⏱  Terminado: {sync.ok} ok / {sync.failed} fail / {sync.skipped} skip", "info")
     except Exception as e:
