@@ -355,10 +355,10 @@ code {
 
 .side-col .card .log {
   margin-top: 12px;
-  flex: 1;
+  height: 400px;
   overflow-y: auto;
   scroll-behavior: smooth;
-  min-height: 200px;
+  flex-shrink: 0;
 }
 
 .log::-webkit-scrollbar {
