@@ -1,72 +1,82 @@
-{% extends "base.html" %}
-{% block content %}
-
-<div class="dashboard">
-
-  {% if not ffmpeg_ok %}
-  <div class="card warn">
-    <h3>⚠️ ffmpeg no detectado</h3>
-    <p>Las descargas no funcionarán sin <code>ffmpeg</code>. Instálalo y reinicia la app.</p>
-  </div>
-  {% endif %}
-
-  <div class="stats">
-    <div class="stat">
-      <div class="stat-value" id="stat-completed">{{ completed_total }}</div>
-      <div class="stat-label">Descargadas</div>
-    </div>
-    <div class="stat">
-      <div class="stat-value" id="stat-failed">{{ failed_total }}</div>
-      <div class="stat-label">Fallidas</div>
-    </div>
-    <div class="stat">
-      <div class="stat-value" id="stat-pending">—</div>
-      <div class="stat-label">Pendientes</div>
-    </div>
-  </div>
-
-  <div class="card hero">
-    <div id="hero-idle">
-      <h2>Listo para sincronizar</h2>
-      <p class="muted">Voy a buscar canciones nuevas en tus favoritos de Spotify y descargarlas en:</p>
-      <p class="folder"><code>{{ cfg.get('download_folder') }}</code></p>
-      <div class="actions">
-        <button id="btn-start" class="btn primary big">▶ Sincronizar ahora</button>
-        <button id="btn-retry" class="btn ghost">↻ Reintentar fallidas</button>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Liked Songs Downloader</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="app">
+    <main class="content">
+      {% if not ffmpeg_ok %}
+      <div class="card warn">
+        <h3>⚠️ ffmpeg no detectado</h3>
+        <p>Las descargas no funcionarán sin <code>ffmpeg</code>. Instálalo y reinicia la app.</p>
       </div>
-    </div>
+      {% endif %}
 
-    <div id="hero-running" hidden>
-      <h2 id="run-title">Descargando...</h2>
-      <p id="run-current" class="current">—</p>
-      <div class="progress">
-        <div class="progress-bar" id="progress-bar"></div>
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-value" id="stat-completed">{{ completed_total }}</div>
+          <div class="stat-label">Descargadas</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="stat-failed">{{ failed_total }}</div>
+          <div class="stat-label">Fallidas</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="stat-pending">—</div>
+          <div class="stat-label">Pendientes</div>
+        </div>
       </div>
-      <p id="run-counts" class="muted">0 / 0</p>
-      <button id="btn-stop" class="btn ghost">⏹ Detener</button>
-    </div>
+
+      <div class="dashboard-grid">
+        <div class="main-col">
+          <div class="card hero">
+            <div id="hero-idle">
+              <h2>Listo para sincronizar</h2>
+              <p class="muted">Voy a buscar canciones nuevas en tus favoritos de Spotify y descargarlas en:</p>
+              <p class="folder"><code>{{ cfg.get('download_folder') }}</code></p>
+              <div class="actions">
+                <button id="btn-start" class="btn primary big">▶ Sincronizar ahora</button>
+                <button id="btn-retry" class="btn ghost">↻ Reintentar fallidas</button>
+              </div>
+            </div>
+
+            <div id="hero-running" hidden>
+              <h2 id="run-title">Descargando...</h2>
+              <p id="run-current" class="current">—</p>
+              <div class="progress">
+                <div class="progress-bar" id="progress-bar"></div>
+              </div>
+              <p id="run-counts" class="muted">0 / 0</p>
+              <button id="btn-stop" class="btn ghost">⏹ Detener</button>
+            </div>
+          </div>
+
+          <div class="card actions-card">
+            <button id="btn-open" class="btn ghost">📁 Abrir carpeta de descargas</button>
+            <button id="btn-update-list" class="btn ghost">📋 Actualizar lista de canciones</button>
+            <button id="btn-settings" class="btn ghost">⚙ Cambiar carpeta/calidad</button>
+            <button id="btn-clear-data" class="btn ghost" style="color:#ff6b6b">🗑 Limpiar todo</button>
+          </div>
+        </div>
+
+        <div class="side-col">
+          <div class="card">
+            <div class="row between">
+              <h3>Registro</h3>
+              <button id="btn-clear-log" class="btn link small">limpiar</button>
+            </div>
+            <div id="log" class="log"></div>
+          </div>
+        </div>
+      </div>
+
+    </main>
   </div>
 
-  <div class="card">
-    <div class="row between">
-      <h3>Registro</h3>
-      <button id="btn-clear-log" class="btn link small">limpiar</button>
-    </div>
-    <div id="log" class="log"></div>
-  </div>
-
-  <div class="card actions-card">
-    <button id="btn-open" class="btn ghost">📁 Abrir carpeta de descargas</button>
-    <button id="btn-update-list" class="btn ghost">📋 Actualizar lista de canciones</button>
-    <button id="btn-settings" class="btn ghost">⚙ Cambiar carpeta/calidad</button>
-    <button id="btn-clear-data" class="btn ghost" style="color:#ff6b6b">🗑 Limpiar todo</button>
-  </div>
-
-</div>
-
-{% endblock %}
-
-{% block scripts %}
 <script>
 const $ = (id) => document.getElementById(id);
 const logEl = $('log');
@@ -80,7 +90,6 @@ function appendLog(msg, level='info') {
   line.innerHTML = `<span class="log-ts">${ts}</span> ${escapeHtml(msg)}`;
   logEl.appendChild(line);
   logEl.scrollTop = logEl.scrollHeight;
-  // Cap at 500 lines
   while (logEl.children.length > 500) logEl.removeChild(logEl.firstChild);
 }
 
@@ -116,7 +125,6 @@ function connectStream() {
     if (evt.type === 'status') updateUI(evt);
     else if (evt.type === 'log') appendLog(evt.message, evt.level || 'info');
     else if (evt.type === 'done') {
-      // Refresh stats one more time
       fetch('/api/sync/status').then(r => r.json()).then(updateUI);
     }
   };
@@ -163,7 +171,7 @@ $('btn-clear-data').addEventListener('click', async () => {
   location.reload();
 });
 
-// Initial status fetch
 fetch('/api/sync/status').then(r => r.json()).then(updateUI);
 </script>
-{% endblock %}
+</body>
+</html>

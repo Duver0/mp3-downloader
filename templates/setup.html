@@ -1,221 +1,232 @@
-{% extends "base.html" %}
-{% block content %}
+<!DOCTYPE html>
+<html lang="es">
 
-<div class="wizard">
-  <ol class="steps">
-    <li class="{{ 'done' if step|int > 1 else 'active' if step == '1' else '' }}"><span>1</span>Tu música</li>
-    <li class="{{ 'done' if step|int > 2 else 'active' if step == '2' else '' }}"><span>2</span>Carpeta</li>
-    <li class="{{ 'active' if step == '3' else '' }}"><span>3</span>Listo</li>
-  </ol>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Liked Songs Downloader</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
 
-  {% if not ffmpeg_ok %}
-  <div class="card warn">
-    <h3>⚠️ Falta ffmpeg</h3>
-    <p>Necesitas <code>ffmpeg</code> en tu sistema para extraer audio:</p>
-    <ul class="install">
-      <li><b>macOS:</b> <code>brew install ffmpeg</code></li>
-      <li><b>Linux:</b> <code>sudo apt install ffmpeg</code></li>
-      <li><b>Windows:</b> descarga de <a href="https://ffmpeg.org/download.html" target="_blank">ffmpeg.org</a> y añade al PATH</li>
-    </ul>
-  </div>
-  {% endif %}
+<body>
+  <div class="app">
+    <main class="content">
+      <div class="wizard">
+        <ol class="steps">
+          <li class="{{ 'done' if step|int > 1 else 'active' if step == '1' else '' }}"><span>1</span>Tu música</li>
+          <li class="{{ 'done' if step|int > 2 else 'active' if step == '2' else '' }}"><span>2</span>Carpeta</li>
+          <li class="{{ 'active' if step == '3' else '' }}"><span>3</span>Listo</li>
+        </ol>
 
-  {# ─── STEP 1: Paste songs ─── #}
-  {% if step == '1' %}
-  <div class="card">
-    <h2>Paso 1 — Tus canciones favoritas</h2>
-    <p class="muted">Spotify cambió su API en febrero 2026 y ahora exige cuenta Premium para los desarrolladores. Como eso no aplica a ti, vamos por la puerta libre: copy &amp; paste.</p>
+        {% if not ffmpeg_ok %}
+        <div class="card warn">
+          <h3>⚠️ Falta ffmpeg</h3>
+          <p>Necesitas <code>ffmpeg</code> en tu sistema para extraer audio:</p>
+          <ul class="install">
+            <li><b>macOS:</b> <code>brew install ffmpeg</code></li>
+            <li><b>Linux:</b> <code>sudo apt install ffmpeg</code></li>
+            <li><b>Windows:</b> descarga de <a href="https://ffmpeg.org/download.html" target="_blank">ffmpeg.org</a> y
+              añade al PATH</li>
+          </ul>
+        </div>
+        {% endif %}
 
-    <h3 style="margin-top:24px">Cómo hacerlo</h3>
-    <ol class="howto">
-      <li>Abre <b>Spotify web</b> y ve a <b>Tu biblioteca → Canciones</b>.</li>
-      <li>Abre la consola del navegador: <code>F12</code> (o <code>Ctrl+Shift+I</code> / <code>Cmd+Option+I</code>).</li>
-      <li>
-        <button type="button" class="btn small" onclick="copyScriptFromFile()">📋 Copiar script</button>
-        y pégalo en la consola, luego presiona Enter.
-      </li>
-      <li>Cuando termine de cargar, aparecerá un botón verde. <b>Haz click en él</b> para copiar las canciones.</li>
-      <li>Pega el resultado en el cuadro de abajo.</li>
-    </ol>
-    <p class="muted small">El script extrae título y artista de cada canción. Al terminar, haz click en el botón verde para copiar al portapapeles en formato <code>Título - Artista</code> (uno por línea).</p>
-
-    <form id="form1" class="form">
-      <label>
-        <span>Pega aquí tus canciones</span>
-        <textarea name="songs_text" rows="12" required spellcheck="false"
-                  placeholder="Título - Artista
+        {# ─── STEP 1: Paste songs ─── #}
+        {% if step == '1' %}
+        <div class="card">
+          <ol class="howto">
+            <li>Abre <b>Spotify web</b> y ve a <b>Tu biblioteca → Canciones</b>.</li>
+            <li>Abre la consola del navegador: <code>F12</code> (o <code>Ctrl+Shift+I</code> /
+              <code>Cmd+Option+I</code>).</li>
+            <li>
+              <button type="button" class="btn small" onclick="copyScriptFromFile()">📋 Copiar script</button>
+              y pégalo en la consola, luego presiona Enter.
+            </li>
+            <li>Cuando termine de cargar, aparecerá un botón verde. <b>Haz click en él</b> para copiar las canciones.
+            </li>
+            <li>Pega el resultado en el cuadro de abajo.</li>
+          </ol>
+          <form id="form1" class="form">
+            <label>
+              <span>Pega aquí tus canciones</span>
+              <textarea name="songs_text" rows="12" required spellcheck="false" placeholder="Título - Artista
 Bohemian Rhapsody - Queen
 Hey Jude - The Beatles"></textarea>
-      </label>
+            </label>
 
-      {% if songs_count > 0 %}
-      <p class="muted">Ya tienes <b>{{ songs_count }}</b> canciones cargadas. Si pegas más se agregan a la lista (sin duplicar).</p>
-      {% endif %}
+            {% if songs_count > 0 %}
+            <p class="muted">Ya tienes <b>{{ songs_count }}</b> canciones cargadas. Si pegas más se agregan a la lista
+              (sin duplicar).</p>
+            {% endif %}
 
-      <div class="row">
-        <button type="submit" class="btn primary">Cargar lista →</button>
-        {% if songs_count > 0 %}
-        <button type="button" id="btn-clear" class="btn ghost">Borrar lista actual</button>
-        <a href="/setup?step=2" class="btn ghost">Saltar (usar lista actual)</a>
+            <div class="row">
+              <button type="submit" class="btn primary">Cargar lista →</button>
+              {% if songs_count > 0 %}
+              <button type="button" id="btn-clear" class="btn ghost">Borrar lista actual</button>
+              <a href="/setup?step=2" class="btn ghost">Saltar (usar lista actual)</a>
+              {% endif %}
+            </div>
+          </form>
+
+          <div id="resolve-progress" class="resolve-box" hidden>
+            <h3>Procesando...</h3>
+            <div class="progress">
+              <div class="progress-bar" id="rp-bar"></div>
+            </div>
+            <p id="rp-counts" class="muted small">0 / 0</p>
+            <div id="rp-log" class="log small"></div>
+          </div>
+        </div>
         {% endif %}
-      </div>
-    </form>
 
-    <div id="resolve-progress" class="resolve-box" hidden>
-      <h3>Procesando...</h3>
-      <div class="progress"><div class="progress-bar" id="rp-bar"></div></div>
-      <p id="rp-counts" class="muted small">0 / 0</p>
-      <div id="rp-log" class="log small"></div>
-    </div>
-  </div>
-  {% endif %}
+        {# ─── STEP 2: Folder + audio ─── #}
+        {% if step == '2' %}
+        <div class="card">
+          <h2>Paso 2 — Dónde guardar las canciones</h2>
+          <p class="ok">✓ {{ songs_count }} canciones en la lista</p>
 
-  {# ─── STEP 2: Folder + audio ─── #}
-  {% if step == '2' %}
-  <div class="card">
-    <h2>Paso 2 — Dónde guardar las canciones</h2>
-    <p class="ok">✓ {{ songs_count }} canciones en la lista</p>
+          <form id="form2" class="form">
+            <label>
+              <span>Carpeta de descarga</span>
+              <input type="text" name="download_folder" required
+                value="{{ cfg.get('download_folder') or default_folder }}" spellcheck="false">
+              <small class="muted">Por defecto: <code>{{ default_folder }}</code> — la carpeta se crea sola si no
+                existe.</small>
+            </label>
 
-    <form id="form2" class="form">
-      <label>
-        <span>Carpeta de descarga</span>
-        <input type="text" name="download_folder" required
-               value="{{ cfg.get('download_folder') or default_folder }}"
-               spellcheck="false">
-        <small class="muted">Por defecto: <code>{{ default_folder }}</code> — la carpeta se crea sola si no existe.</small>
-      </label>
+            <div class="row">
+              <label>
+                <span>Formato</span>
+                <select name="audio_format">
+                  <option value="mp3" {% if cfg.get('audio_format', 'mp3' )=='mp3' %}selected{% endif %}>MP3</option>
+                  <option value="m4a" {% if cfg.get('audio_format')=='m4a' %}selected{% endif %}>M4A</option>
+                  <option value="opus" {% if cfg.get('audio_format')=='opus' %}selected{% endif %}>Opus</option>
+                </select>
+              </label>
+              <label>
+                <span>Calidad (kbps)</span>
+                <select name="audio_quality">
+                  <option value="128" {% if cfg.get('audio_quality')=='128' %}selected{% endif %}>128</option>
+                  <option value="192" {% if cfg.get('audio_quality', '192' )=='192' %}selected{% endif %}>192
+                    (recomendado)</option>
+                  <option value="256" {% if cfg.get('audio_quality')=='256' %}selected{% endif %}>256</option>
+                  <option value="320" {% if cfg.get('audio_quality')=='320' %}selected{% endif %}>320</option>
+                </select>
+              </label>
+            </div>
 
-      <div class="row">
-        <label>
-          <span>Formato</span>
-          <select name="audio_format">
-            <option value="mp3" {% if cfg.get('audio_format', 'mp3') == 'mp3' %}selected{% endif %}>MP3</option>
-            <option value="m4a" {% if cfg.get('audio_format') == 'm4a' %}selected{% endif %}>M4A</option>
-            <option value="opus" {% if cfg.get('audio_format') == 'opus' %}selected{% endif %}>Opus</option>
-          </select>
-        </label>
-        <label>
-          <span>Calidad (kbps)</span>
-          <select name="audio_quality">
-            <option value="128" {% if cfg.get('audio_quality') == '128' %}selected{% endif %}>128</option>
-            <option value="192" {% if cfg.get('audio_quality', '192') == '192' %}selected{% endif %}>192 (recomendado)</option>
-            <option value="256" {% if cfg.get('audio_quality') == '256' %}selected{% endif %}>256</option>
-            <option value="320" {% if cfg.get('audio_quality') == '320' %}selected{% endif %}>320</option>
-          </select>
-        </label>
+            <button type="submit" class="btn primary">Guardar y continuar →</button>
+          </form>
+        </div>
+        {% endif %}
+
       </div>
 
-      <button type="submit" class="btn primary">Guardar y continuar →</button>
-    </form>
+    </main>
   </div>
-{% endif %}
 
-</div>
+  <script>
+    const $ = (id) => document.getElementById(id);
 
-{% endblock %}
-
-{% block scripts %}
-<script>
-const $ = (id) => document.getElementById(id);
-
-async function copyScriptFromFile() {
-    try {
+    async function copyScriptFromFile() {
+      try {
         const response = await fetch('/static/spotify-scraper.js');
         const scriptContent = await response.text();
-        
+
         navigator.clipboard.writeText(scriptContent).then(() => {
-            alert('✅ Script copiado al portapapeles\n\nPégalo en la consola del navegador (F12)');
+          alert('✅ Script copiado al portapapeles\n\nPégalo en la consola del navegador (F12)');
         }).catch(() => {
-            const ta = document.createElement('textarea');
-            ta.value = scriptContent;
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            document.body.removeChild(ta);
-            alert('✅ Script copiado al portapapeles\n\nPégalo en la consola del navegador (F12)');
+          const ta = document.createElement('textarea');
+          ta.value = scriptContent;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          alert('✅ Script copiado al portapapeles\n\nPégalo en la consola del navegador (F12)');
         });
-    } catch(e) {
+      } catch (e) {
         alert('❌ Error al cargar el script');
-    }
-}
-
-async function postJSON(url, data) {
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(data || {}),
-  });
-  return r.json();
-}
-
-const form1 = document.getElementById('form1');
-if (form1) {
-  const progBox = $('resolve-progress');
-  const rpBar = $('rp-bar');
-  const rpCounts = $('rp-counts');
-  const rpLog = $('rp-log');
-
-  form1.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(form1);
-    const text = fd.get('songs_text').trim();
-    if (!text) return;
-
-    sessionStorage.setItem('songs_input_text', text);
-
-    progBox.hidden = false;
-    rpLog.innerHTML = '';
-
-    const r = await postJSON('/api/songs/load', {text});
-    if (r.error) {
-      rpLog.innerHTML = '<div class="log-error">' + r.error + '</div>';
-      return;
-    }
-    // Listen to SSE for progress
-    const es = new EventSource('/api/sync/stream');
-    es.onmessage = (ev) => {
-      const evt = JSON.parse(ev.data);
-      if (evt.type === 'resolve') {
-        const pct = evt.total ? Math.round(100 * evt.done / evt.total) : 0;
-        rpBar.style.width = pct + '%';
-        rpCounts.innerText = `${evt.done} / ${evt.total}  ·  ${evt.ok} ok · ${evt.failed} fail`;
-      } else if (evt.type === 'log') {
-        const line = document.createElement('div');
-        line.className = 'log-line log-' + (evt.level || 'info');
-        line.innerText = evt.message;
-        rpLog.appendChild(line);
-        rpLog.scrollTop = rpLog.scrollHeight;
-      } else if (evt.type === 'resolve_done') {
-        es.close();
-        setTimeout(() => { location.href = '/setup?step=2'; }, 800);
       }
-    };
-    es.onerror = () => { /* quietly ignore until done */ };
-  });
+    }
 
-  const btnClear = $('btn-clear');
-  if (btnClear) {
-    btnClear.addEventListener('click', async () => {
-      if (!confirm('¿Borrar la lista actual y el progreso de descargas?')) return;
-      await postJSON('/api/songs/clear');
-      location.reload();
-    });
-  }
-}
+    async function postJSON(url, data) {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data || {}),
+      });
+      return r.json();
+    }
 
-const form2 = document.getElementById('form2');
-if (form2) {
-  form2.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(form2);
-    await postJSON('/api/config', {
-      download_folder: fd.get('download_folder'),
-      audio_format: fd.get('audio_format'),
-      audio_quality: fd.get('audio_quality'),
-    });
-    sessionStorage.removeItem('songs_input_text');
-    location.href = '/dashboard';
-  });
-}
-</script>
-{% endblock %}
+    const form1 = document.getElementById('form1');
+    if (form1) {
+      const progBox = $('resolve-progress');
+      const rpBar = $('rp-bar');
+      const rpCounts = $('rp-counts');
+      const rpLog = $('rp-log');
+
+      form1.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = new FormData(form1);
+        const text = fd.get('songs_text').trim();
+        if (!text) return;
+
+        sessionStorage.setItem('songs_input_text', text);
+
+        progBox.hidden = false;
+        rpLog.innerHTML = '';
+
+        const r = await postJSON('/api/songs/load', { text });
+        if (r.error) {
+          rpLog.innerHTML = '<div class="log-error">' + r.error + '</div>';
+          return;
+        }
+        const es = new EventSource('/api/sync/stream');
+        es.onmessage = (ev) => {
+          const evt = JSON.parse(ev.data);
+          if (evt.type === 'resolve') {
+            const pct = evt.total ? Math.round(100 * evt.done / evt.total) : 0;
+            rpBar.style.width = pct + '%';
+            rpCounts.innerText = `${evt.done} / ${evt.total}  ·  ${evt.ok} ok · ${evt.failed} fail`;
+          } else if (evt.type === 'log') {
+            const line = document.createElement('div');
+            line.className = 'log-line log-' + (evt.level || 'info');
+            line.innerText = evt.message;
+            rpLog.appendChild(line);
+            rpLog.scrollTop = rpLog.scrollHeight;
+          } else if (evt.type === 'resolve_done') {
+            es.close();
+            setTimeout(() => { location.href = '/setup?step=2'; }, 800);
+          }
+        };
+        es.onerror = () => { };
+      });
+
+      const btnClear = $('btn-clear');
+      if (btnClear) {
+        btnClear.addEventListener('click', async () => {
+          if (!confirm('¿Borrar la lista actual y el progreso de descargas?')) return;
+          await postJSON('/api/songs/clear');
+          location.reload();
+        });
+      }
+    }
+
+    const form2 = document.getElementById('form2');
+    if (form2) {
+      form2.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = new FormData(form2);
+        await postJSON('/api/config', {
+          download_folder: fd.get('download_folder'),
+          audio_format: fd.get('audio_format'),
+          audio_quality: fd.get('audio_quality'),
+        });
+        sessionStorage.removeItem('songs_input_text');
+        location.href = '/dashboard';
+      });
+    }
+  </script>
+</body>
+
+</html>
