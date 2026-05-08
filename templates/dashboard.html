@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="dashboard">
+
+  {% if not ffmpeg_ok %}
+  <div class="card warn">
+    <h3>⚠️ ffmpeg no detectado</h3>
+    <p>Las descargas no funcionarán sin <code>ffmpeg</code>. Instálalo y reinicia la app.</p>
+  </div>
+  {% endif %}
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-value" id="stat-completed">{{ completed_total }}</div>
+      <div class="stat-label">Descargadas</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="stat-failed">{{ failed_total }}</div>
+      <div class="stat-label">Fallidas</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="stat-pending">—</div>
+      <div class="stat-label">Pendientes</div>
+    </div>
+  </div>
+
+  <div class="card hero">
+    <div id="hero-idle">
+      <h2>Listo para sincronizar</h2>
+      <p class="muted">Voy a buscar canciones nuevas en tus favoritos de Spotify y descargarlas en:</p>
+      <p class="folder"><code>{{ cfg.get('download_folder') }}</code></p>
+      <div class="actions">
+        <button id="btn-start" class="btn primary big">▶ Sincronizar ahora</button>
+        <button id="btn-retry" class="btn ghost">↻ Reintentar fallidas</button>
+      </div>
+    </div>
+
+    <div id="hero-running" hidden>
+      <h2 id="run-title">Descargando...</h2>
+      <p id="run-current" class="current">—</p>
+      <div class="progress">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+      <p id="run-counts" class="muted">0 / 0</p>
+      <button id="btn-stop" class="btn ghost">⏹ Detener</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row between">
+      <h3>Registro</h3>
+      <button id="btn-clear-log" class="btn link small">limpiar</button>
+    </div>
+    <div id="log" class="log"></div>
+  </div>
+
+  <div class="card actions-card">
+    <button id="btn-open" class="btn ghost">📁 Abrir carpeta de descargas</button>
+    <button id="btn-update-list" class="btn ghost">📋 Actualizar lista de canciones</button>
+    <button id="btn-settings" class="btn ghost">⚙ Cambiar carpeta/calidad</button>
+    <button id="btn-clear-data" class="btn ghost" style="color:#ff6b6b">🗑 Limpiar todo</button>
+  </div>
+
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+const heroIdle = $('hero-idle');
+const heroRunning = $('hero-running');
+
+function appendLog(msg, level='info') {
+  const ts = new Date().toLocaleTimeString('es-ES', {hour12: false});
+  const line = document.createElement('div');
+  line.className = `log-line log-${level}`;
+  line.innerHTML = `<span class="log-ts">${ts}</span> ${escapeHtml(msg)}`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+  // Cap at 500 lines
+  while (logEl.children.length > 500) logEl.removeChild(logEl.firstChild);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+function updateUI(s) {
+  $('stat-completed').innerText = s.completed_total;
+  $('stat-failed').innerText = s.failed_total;
+  if (s.is_running) {
+    heroIdle.hidden = true;
+    heroRunning.hidden = false;
+    $('run-current').innerText = s.current || '—';
+    const pct = s.total ? Math.round(100 * s.processed / s.total) : 0;
+    $('progress-bar').style.width = pct + '%';
+    $('run-counts').innerText =
+      `${s.processed} / ${s.total}  ·  ${s.ok} ok · ${s.failed} fail · ${s.skipped} skip`;
+    $('stat-pending').innerText = Math.max(0, s.total - s.processed);
+  } else {
+    heroIdle.hidden = false;
+    heroRunning.hidden = true;
+    $('stat-pending').innerText = s.total ? Math.max(0, s.total - s.processed) : '—';
+  }
+}
+
+function connectStream() {
+  const es = new EventSource('/api/sync/stream');
+  es.onmessage = (e) => {
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'status') updateUI(evt);
+    else if (evt.type === 'log') appendLog(evt.message, evt.level || 'info');
+    else if (evt.type === 'done') {
+      // Refresh stats one more time
+      fetch('/api/sync/status').then(r => r.json()).then(updateUI);
+    }
+  };
+  es.onerror = () => {
+    es.close();
+    setTimeout(connectStream, 2000);
+  };
+}
+connectStream();
+
+async function postJSON(url, data) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data || {}),
+  });
+  return r.json();
+}
+
+$('btn-start').addEventListener('click', async () => {
+  const r = await postJSON('/api/sync/start', {retry_failed: false});
+  if (r.error) appendLog('Error: ' + r.error, 'error');
+});
+$('btn-retry').addEventListener('click', async () => {
+  const r = await postJSON('/api/sync/start', {retry_failed: true});
+  if (r.error) appendLog('Error: ' + r.error, 'error');
+});
+$('btn-stop').addEventListener('click', async () => {
+  await postJSON('/api/sync/stop');
+});
+$('btn-clear-log').addEventListener('click', () => { logEl.innerHTML = ''; });
+$('btn-open').addEventListener('click', async () => {
+  await postJSON('/api/folder/open');
+});
+$('btn-settings').addEventListener('click', () => {
+  location.href = '/setup?step=2';
+});
+$('btn-update-list').addEventListener('click', () => {
+  location.href = '/setup?step=1';
+});
+$('btn-clear-data').addEventListener('click', async () => {
+  if (!confirm('⚠️ ¿Limpiar TODO?\n\nEsto eliminará:\n- Lista de canciones\n- Progreso de descargas\n- Canciones descargadas\n\n¿Estás seguro?')) return;
+  await postJSON('/api/data/clear');
+  location.reload();
+});
+
+// Initial status fetch
+fetch('/api/sync/status').then(r => r.json()).then(updateUI);
+</script>
+{% endblock %}

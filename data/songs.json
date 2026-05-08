@@ -1,0 +1,92 @@
+[
+  {
+    "id": "txt:fashionably_late_falling_in_reverse",
+    "name": "Fashionably Late",
+    "artists": [
+      "Falling In Reverse"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  },
+  {
+    "id": "txt:インフェルノ_mrs_green_apple",
+    "name": "インフェルノ",
+    "artists": [
+      "Mrs. GREEN APPLE"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  },
+  {
+    "id": "txt:hot_dog_limp_bizkit",
+    "name": "Hot Dog",
+    "artists": [
+      "Limp Bizkit"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  },
+  {
+    "id": "txt:オトノケ_otonoke_creepy_nuts",
+    "name": "オトノケ",
+    "artists": [
+      "Otonoke - Creepy Nuts"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  },
+  {
+    "id": "txt:セレナーデ_natori",
+    "name": "セレナーデ",
+    "artists": [
+      "natori"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  },
+  {
+    "id": "txt:test_me_chanmina",
+    "name": "TEST ME",
+    "artists": [
+      "CHANMINA"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  },
+  {
+    "id": "txt:no_fear_falling_in_reverse",
+    "name": "NO FEAR",
+    "artists": [
+      "Falling In Reverse"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  },
+  {
+    "id": "txt:voices_motionless_in_white",
+    "name": "Voices",
+    "artists": [
+      "Motionless In White"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  },
+  {
+    "id": "txt:thnks_fr_th_mmrs_fall_out_boy",
+    "name": "Thnks fr th Mmrs",
+    "artists": [
+      "Fall Out Boy"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  },
+  {
+    "id": "txt:jane_doe_kenshi_yonezu",
+    "name": "JANE DOE",
+    "artists": [
+      "Kenshi Yonezu"
+    ],
+    "duration_ms": 0,
+    "source": "text"
+  }
+]

@@ -1,0 +1,47 @@
+{
+  "completed": {
+    "txt:fashionably_late_falling_in_reverse": {
+      "filename": "Fashionably Late.mp3",
+      "completed_at": "2026-05-08T18:57:24.554886+00:00"
+    },
+    "txt:インフェルノ_mrs_green_apple": {
+      "filename": "インフェルノ.mp3",
+      "completed_at": "2026-05-08T18:57:38.076852+00:00"
+    },
+    "txt:オトノケ_otonoke_creepy_nuts": {
+      "filename": "オトノケ.mp3",
+      "completed_at": "2026-05-08T18:57:54.630063+00:00"
+    },
+    "txt:セレナーデ_natori": {
+      "filename": "セレナーデ.mp3",
+      "completed_at": "2026-05-08T18:58:05.550299+00:00"
+    },
+    "txt:test_me_chanmina": {
+      "filename": "TEST ME.mp3",
+      "completed_at": "2026-05-08T18:59:24.546226+00:00"
+    },
+    "txt:no_fear_falling_in_reverse": {
+      "filename": "NO FEAR.mp3",
+      "completed_at": "2026-05-08T18:59:33.981851+00:00"
+    },
+    "txt:voices_motionless_in_white": {
+      "filename": "Voices.mp3",
+      "completed_at": "2026-05-08T18:59:43.696957+00:00"
+    },
+    "txt:thnks_fr_th_mmrs_fall_out_boy": {
+      "filename": "Thnks fr th Mmrs.mp3",
+      "completed_at": "2026-05-08T18:59:53.625079+00:00"
+    },
+    "txt:jane_doe_kenshi_yonezu": {
+      "filename": "JANE DOE.mp3",
+      "completed_at": "2026-05-08T19:00:05.104029+00:00"
+    }
+  },
+  "failed": {
+    "txt:hot_dog_limp_bizkit": {
+      "error": "download_error: no se pudo descargar via Invidious: ZlGyu9EJbmE",
+      "attempts": 1,
+      "last_attempt": "2026-05-08T18:57:44.116788+00:00"
+    }
+  }
+}
