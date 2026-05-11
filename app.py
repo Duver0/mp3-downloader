@@ -375,24 +375,30 @@ def yt_search(query: str, n: int = 5) -> list[dict]:
 
 
 def yt_search_invidious(query: str, n: int = 5) -> list[dict]:
-    """Search via Invidious instance (bypasses age restrictions)."""
-    invidious_instances = [
-        "https://inv.nadeko.net",
-        "https://invidious.privacyredirect.com",
-        "https://yewtu.be",
-    ]
-    for instance in invidious_instances:
+    """Search via Invidious REST API (bypasses YouTube bot blocks)."""
+    for instance in INVIDIOUS_INSTANCES:
         try:
-            search_url = f"{instance}/search?q={query}"
-            opts = {
-                "quiet": True, "no_warnings": True,
-                "skip_download": True,
-                "extractor_keys": ["Invidious"],
-            }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                res = ydl.extract_info(search_url, download=False)
-                if res and res.get("entries"):
-                    return res["entries"][:n]
+            r = requests.get(
+                f"{instance}/api/v1/search",
+                params={"q": query, "type": "video"},
+                timeout=6,
+                headers={"User-Agent": HTTP_HEADERS["User-Agent"]},
+            )
+            if not r.ok: continue
+            data = r.json()
+            entries = []
+            for v in data[:n]:
+                if v.get("type") != "video": continue
+                entries.append({
+                    "id": v.get("videoId"),
+                    "title": v.get("title"),
+                    "duration": v.get("lengthSeconds"),
+                    "url": f"https://www.youtube.com/watch?v={v.get('videoId')}",
+                    "channel": v.get("author"),
+                    "uploader": v.get("author"),
+                    "view_count": v.get("viewCount"),
+                })
+            if entries: return entries
         except Exception:
             continue
     return []
@@ -473,27 +479,26 @@ def find_best(track: dict, retry_name_only: bool = False) -> Optional[dict]:
     seen, candidates = set(), []
     for q in queries:
         if not q: continue
-        if retry_name_only:
-            for c in yt_search_flat(q, n=5):
+        searchers = [yt_search_flat, yt_search_invidious] if retry_name_only \
+                    else [yt_search, yt_search_invidious, yt_search_flat]
+        for searcher in searchers:
+            for c in searcher(q, n=5):
                 cid = c.get("id")
                 if cid and cid not in seen:
                     seen.add(cid); candidates.append(c)
-            if not candidates:
-                for c in yt_search_invidious(q, n=5):
-                    cid = c.get("id")
-                    if cid and cid not in seen:
-                        seen.add(cid); candidates.append(c)
-        else:
-            for c in yt_search(q, n=5):
-                cid = c.get("id")
-                if cid and cid not in seen:
-                    seen.add(cid); candidates.append(c)
+            if candidates: break
         if len(candidates) >= 5: break
-    if not candidates: return None
+    if not candidates:
+        sync.emit_log(f"  ⚠ búsqueda sin resultados para '{name}' (artist: '{artist}')", "warn")
+        return None
     scored = sorted(((score_match(c, track), c) for c in candidates),
                     key=lambda x: x[0], reverse=True)
     best_s, best = scored[0]
     result = best if best_s >= 20 else None
+    if not result:
+        sync.emit_log(
+            f"  ⚠ '{name}': mejor coincidencia '{best.get('title','?')}' "
+            f"score {best_s:.1f} < umbral 20", "warn")
 
     # Store in cache if found
     if result and not retry_name_only and artist and name:
@@ -502,120 +507,319 @@ def find_best(track: dict, retry_name_only: bool = False) -> Optional[dict]:
     return result
 
 
-def download_audio(video: dict, out_no_ext: Path,
-                   audio_format: str, audio_quality: str) -> Path:
-    vid = video.get("id")
-    url = video.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None)
-    if not url: raise ValueError("video sin URL")
-    
-    final = out_no_ext.with_suffix(f".{audio_format}")
-    
-    if final.exists():
-        return final
-    
+BOT_SIGNALS = ("age", "sign in", "bot", "confirm you", "captcha",
+               "403", "forbidden", "unavailable", "private video",
+               "members-only", "po_token", "format is not available",
+               "requested format")
+
+
+def _with_ext(out_no_ext: Path, ext: str) -> Path:
+    """Append `.ext` without replacing existing dot-segments in the filename.
+    Path.with_suffix replaces last `.X`, so files like 'T.N.T' get mangled."""
+    return out_no_ext.parent / f"{out_no_ext.name}.{ext}"
+
+
+class _SilentLogger:
+    def debug(self, m): pass
+    def info(self, m): pass
+    def warning(self, m): pass
+    def error(self, m): pass
+
+
+_silent_logger = _SilentLogger()
+
+
+def _ytdlp_attempt(url: str, out_no_ext: Path,
+                   audio_format: str, audio_quality: str,
+                   client: str, format_spec: str) -> Optional[Exception]:
     opts = {
-        "format": "bestaudio/best",
+        "format": format_spec,
         "outtmpl": str(out_no_ext) + ".%(ext)s",
         "quiet": True, "no_warnings": True, "noprogress": True,
+        "logger": _silent_logger,
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": audio_format,
             "preferredquality": audio_quality,
         }],
-        "retries": 3, "fragment_retries": 3,
+        "retries": 2, "fragment_retries": 2,
+        "extractor_args": {"youtube": {
+            "player_client": [client],
+            "formats": "missing_pot",
+        }},
+        "http_headers": {"User-Agent": HTTP_HEADERS["User-Agent"]},
+        "ignore_no_formats_error": False,
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
+        return None
     except Exception as e:
-        if "age" in str(e).lower() or "sign in" in str(e).lower():
-            return download_audio_invidious(vid, out_no_ext, audio_format, audio_quality)
-        raise
-    
-    for ext in [audio_format, "webm", "m4a", "mp4", "ogg", "opus", "flac"]:
-        check = out_no_ext.with_suffix(f".{ext}")
-        if check.exists():
-            if ext != audio_format:
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", str(check),
-                    "-acodec", "libmp3lame" if audio_format == "mp3" else "aac",
-                    "-q:a", "2", str(final)
-                ], capture_output=True)
-                check.unlink()
-                return final
-            else:
-                return final
-    
-    files_in_tmp = list(TMP_DOWNLOAD_DIR.glob(f"{out_no_ext.name}.*"))
-    if files_in_tmp:
-        result_file = files_in_tmp[0]
-        if result_file.suffix.lstrip('.') != audio_format:
-            subprocess.run([
-                "ffmpeg", "-y", "-i", str(result_file),
-                "-acodec", "libmp3lame" if audio_format == "mp3" else "aac",
-                "-q:a", "2", str(final)
-            ], capture_output=True)
-            result_file.unlink()
-        else:
-            result_file.rename(final)
+        return e
+
+
+def _ytdlp_try_clients(url: str, out_no_ext: Path,
+                       audio_format: str, audio_quality: str,
+                       clients: list[str]) -> Optional[Exception]:
+    """Try multiple yt-dlp player_clients with progressive format fallback."""
+    last_err: Optional[Exception] = None
+    format_specs = ["bestaudio/best", "bestaudio*/best*", "best", "worst"]
+    for client in clients:
+        for fmt in format_specs:
+            err = _ytdlp_attempt(url, out_no_ext, audio_format, audio_quality, client, fmt)
+            if err is None:
+                return None
+            last_err = err
+            err_msg = str(err).lower()
+            if "format" not in err_msg and "requested" not in err_msg:
+                break
+    return last_err
+
+
+def _ytdlp_search_download(search_prefix: str, query: str,
+                          out_no_ext: Path, audio_format: str,
+                          audio_quality: str) -> Optional[Exception]:
+    """Search and download from a non-YouTube source via yt-dlp (e.g. scsearch, bcsearch)."""
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": str(out_no_ext) + ".%(ext)s",
+        "quiet": True, "no_warnings": True, "noprogress": True,
+        "logger": _silent_logger,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": audio_format,
+            "preferredquality": audio_quality,
+        }],
+        "retries": 2, "fragment_retries": 2,
+        "default_search": search_prefix,
+        "noplaylist": True,
+        "playlist_items": "1",
+        "http_headers": {"User-Agent": HTTP_HEADERS["User-Agent"]},
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([f"{search_prefix}1:{query}"])
+        return None
+    except Exception as e:
+        return e
+
+
+def download_from_alt_sources(query: str, out_no_ext: Path,
+                              audio_format: str, audio_quality: str) -> Path:
+    """Try non-YouTube sources (SoundCloud, Bandcamp) when YouTube is blocked."""
+    errs: list[str] = []
+    for prefix, label in (("scsearch", "SoundCloud"), ("bcsearch", "Bandcamp")):
+        err = _ytdlp_search_download(prefix, query, out_no_ext, audio_format, audio_quality)
+        if err is None:
+            try:
+                return _locate_downloaded(out_no_ext, audio_format)
+            except FileNotFoundError as fe:
+                errs.append(f"{label}: archivo no encontrado tras descarga ({fe})")
+                continue
+        errs.append(f"{label}: {err}")
+    raise ValueError(f"fuentes alternativas fallaron → {' | '.join(errs)}")
+
+
+def download_audio(video: dict, out_no_ext: Path,
+                   audio_format: str, audio_quality: str,
+                   alt_query: Optional[str] = None) -> Path:
+    vid = video.get("id")
+    url = video.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None)
+    if not url: raise ValueError("video sin URL")
+
+    final = _with_ext(out_no_ext, audio_format)
+    if final.exists():
         return final
-    
-    raise FileNotFoundError(f"archivo no encontrado: {final}")
+
+    clients = ["tv_simply", "tv_embedded", "web_embedded", "ios", "mweb",
+               "web_safari", "android_vr", "web"]
+    err = _ytdlp_try_clients(url, out_no_ext, audio_format, audio_quality, clients)
+    if err is None:
+        return final if final.exists() else _locate_downloaded(out_no_ext, audio_format)
+
+    err_msg = str(err).lower()
+    if not vid or not any(s in err_msg for s in BOT_SIGNALS):
+        raise err
+
+    fallback_errs: list[str] = [f"yt-dlp: {err}"]
+
+    for fallback_fn, label in (
+        (download_audio_invidious, "Invidious"),
+        (download_audio_piped, "Piped"),
+    ):
+        try:
+            return fallback_fn(vid, out_no_ext, audio_format, audio_quality)
+        except Exception as e:
+            fallback_errs.append(f"{label}: {e}")
+            continue
+
+    if alt_query:
+        try:
+            return download_from_alt_sources(alt_query, out_no_ext, audio_format, audio_quality)
+        except Exception as e:
+            fallback_errs.append(str(e))
+
+    raise ValueError(f"todos los métodos fallaron → {' | '.join(fallback_errs)}") from err
+
+
+def _locate_downloaded(out_no_ext: Path, audio_format: str) -> Path:
+    final = _with_ext(out_no_ext, audio_format)
+    if final.exists(): return final
+    for ext in (audio_format, "webm", "m4a", "mp4", "ogg", "opus", "flac", "mp3", "aac"):
+        p = _with_ext(out_no_ext, ext)
+        if p.exists():
+            if ext != audio_format:
+                _ffmpeg_convert(p, final, audio_format)
+                p.unlink(missing_ok=True)
+                return final
+            return p
+    matches = list(out_no_ext.parent.glob(f"{out_no_ext.name}.*"))
+    if matches:
+        src = matches[0]
+        _ffmpeg_convert(src, final, audio_format)
+        src.unlink(missing_ok=True)
+        return final
+    raise FileNotFoundError(f"archivo descargado no encontrado: {out_no_ext}")
+
+
+INVIDIOUS_INSTANCES = [
+    "https://yewtu.be",
+    "https://inv.nadeko.net",
+    "https://invidious.private.coffee",
+    "https://invidious.protokolla.fi",
+    "https://invidious.f5.si",
+    "https://invidious.materialio.us",
+    "https://iv.melmac.space",
+    "https://invidious.lunar.icu",
+]
+
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://pipedapi.privacydev.net",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.r4fo.com",
+    "https://api-piped.mha.fi",
+    "https://pipedapi.leptons.xyz",
+]
+
+
+def _piped_pick_audio(data: dict) -> Optional[str]:
+    streams = data.get("audioStreams") or []
+    if streams:
+        streams.sort(key=lambda s: int(s.get("bitrate") or 0), reverse=True)
+        return streams[0].get("url")
+    return None
+
+
+def download_audio_piped(video_id: str, out_no_ext: Path,
+                        audio_format: str, audio_quality: str) -> Path:
+    """Fallback: fetch stream URL via Piped API, download via HTTP, convert with ffmpeg."""
+    final = _with_ext(out_no_ext, audio_format)
+    raw = _with_ext(out_no_ext, "piped.raw")
+    last_err: Optional[str] = None
+
+    for instance in PIPED_INSTANCES:
+        try:
+            r = requests.get(f"{instance}/streams/{video_id}", timeout=8,
+                             headers={"User-Agent": HTTP_HEADERS["User-Agent"]})
+            if not r.ok:
+                last_err = f"{instance} → HTTP {r.status_code}"
+                continue
+            stream_url = _piped_pick_audio(r.json())
+            if not stream_url:
+                last_err = f"{instance} → sin audio streams"
+                continue
+
+            _download_stream_to_file(stream_url, raw)
+            if raw.stat().st_size < 1024:
+                last_err = f"{instance} → archivo vacío"
+                raw.unlink(missing_ok=True)
+                continue
+
+            _ffmpeg_convert(raw, final, audio_format)
+            raw.unlink(missing_ok=True)
+            if final.exists() and final.stat().st_size > 1024:
+                return final
+            last_err = f"{instance} → conversión ffmpeg falló"
+        except Exception as e:
+            last_err = f"{instance} → {e}"
+            raw.unlink(missing_ok=True)
+            continue
+
+    raise ValueError(f"no se pudo descargar via Piped: {video_id} ({last_err})")
+
+
+def _invidious_pick_audio(data: dict) -> Optional[str]:
+    """Pick best audio-only stream URL from Invidious API response."""
+    fmts = data.get("adaptiveFormats") or []
+    audio_fmts = [f for f in fmts if "audio" in (f.get("type") or "").lower()]
+    if audio_fmts:
+        audio_fmts.sort(key=lambda f: int(f.get("bitrate") or 0), reverse=True)
+        return audio_fmts[0].get("url")
+    for f in (data.get("formatStreams") or []):
+        if f.get("url"): return f["url"]
+    return None
+
+
+def _download_stream_to_file(url: str, dest: Path) -> None:
+    """Stream a URL to file with chunked writes."""
+    with requests.get(url, stream=True, timeout=30,
+                      headers={"User-Agent": HTTP_HEADERS["User-Agent"]}) as r:
+        r.raise_for_status()
+        with dest.open("wb") as fh:
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if chunk: fh.write(chunk)
+
+
+def _ffmpeg_convert(src: Path, dest: Path, audio_format: str) -> None:
+    codec = "libmp3lame" if audio_format == "mp3" else (
+        "libvorbis" if audio_format == "ogg" else (
+        "libopus" if audio_format == "opus" else "aac"))
+    subprocess.run([
+        "ffmpeg", "-y", "-i", str(src),
+        "-vn", "-acodec", codec, "-q:a", "2", str(dest)
+    ], capture_output=True, check=True)
 
 
 def download_audio_invidious(video_id: str, out_no_ext: Path,
                              audio_format: str, audio_quality: str) -> Path:
-    """Download via Invidious API (bypasses age restrictions)."""
-    invidious_instances = [
-        "https://inv.nadeko.net",
-        "https://invidious.privacyredirect.com",
-        "https://yewtu.be",
-    ]
-    
-    for instance in invidious_instances:
+    """Fallback: fetch stream URL from Invidious, download via HTTP, convert with ffmpeg."""
+    final = _with_ext(out_no_ext, audio_format)
+    raw = _with_ext(out_no_ext, "invidious.raw")
+    last_err: Optional[str] = None
+
+    for instance in INVIDIOUS_INSTANCES:
         try:
-            api_url = f"{instance}/api/v1/videos/{video_id}"
-            r = requests.get(api_url, timeout=10)
-            if not r.ok: continue
-            
+            r = requests.get(f"{instance}/api/v1/videos/{video_id}",
+                             timeout=8,
+                             headers={"User-Agent": HTTP_HEADERS["User-Agent"]})
+            if not r.ok:
+                last_err = f"{instance} → HTTP {r.status_code}"
+                continue
             data = r.json()
-            streaming_url = None
-            for format_data in data.get("streamingData", {}).get("adaptiveFormats", []):
-                if "audio" in format_data.get("type", "") or format_data.get("audioQuality"):
-                    streaming_url = format_data.get("url")
-                    if streaming_url: break
-            
-            if not streaming_url:
-                for format_data in data.get("streamingData", {}).get("formats", []):
-                    if "audio" in format_data.get("type", ""):
-                        streaming_url = format_data.get("url")
-                        if streaming_url: break
-            
-            if not streaming_url: continue
-            
-            opts = {
-                "format": "bestaudio/best",
-                "outtmpl": str(out_no_ext) + ".%(ext)s",
-                "quiet": True, "no_warnings": True, "noprogress": True,
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": audio_format,
-                    "preferredquality": audio_quality,
-                }],
-                "retries": 3,
-            }
-            opts["external_downloader"] = "stream"
-            opts["hls_use_mpegts"] = True
-            
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([streaming_url])
-            
-            final = out_no_ext.with_suffix(f".{audio_format}")
-            if final.exists(): return final
-        except Exception:
+            stream_url = _invidious_pick_audio(data)
+            if not stream_url:
+                last_err = f"{instance} → sin streams audio"
+                continue
+
+            _download_stream_to_file(stream_url, raw)
+            if raw.stat().st_size < 1024:
+                last_err = f"{instance} → archivo vacío"
+                raw.unlink(missing_ok=True)
+                continue
+
+            _ffmpeg_convert(raw, final, audio_format)
+            raw.unlink(missing_ok=True)
+            if final.exists() and final.stat().st_size > 1024:
+                return final
+            last_err = f"{instance} → conversión ffmpeg falló"
+        except Exception as e:
+            last_err = f"{instance} → {e}"
+            raw.unlink(missing_ok=True)
             continue
-    
-    raise ValueError(f"no se pudo descargar via Invidious: {video_id}")
+
+    raise ValueError(f"no se pudo descargar via Invidious: {video_id} ({last_err})")
 
 
 def process_track(track: dict, dest_dir: Path, audio_format: str, audio_quality: str) -> str:
@@ -634,20 +838,36 @@ def process_track(track: dict, dest_dir: Path, audio_format: str, audio_quality:
         if track["artists"] and track["artists"][0]:
             sync.emit_log(f"  ↻ reintentando solo con nombre...", "info")
             video = find_best(track, retry_name_only=True)
-    
-    if not video:
-        state.mark_failed(tid, "no_match_found")
-        return f"FAIL [search] {label}"
 
     safe = sanitize(name)
     tmp_no_ext = TMP_DOWNLOAD_DIR / safe
     final_dest = dest_dir / f"{safe}.{audio_format}"
+    alt_query = f"{artist} {name}".strip() or name
+
+    if not video:
+        sync.emit_log(f"  ↻ YouTube sin match, probando SoundCloud/Bandcamp...", "info")
+        try:
+            tmp_final = download_from_alt_sources(alt_query, tmp_no_ext,
+                                                  audio_format, audio_quality)
+        except Exception as e:
+            state.mark_failed(tid, f"no_match_found: {e}")
+            return f"FAIL [search] {label}: {e}"
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            if final_dest.exists(): final_dest.unlink()
+            shutil.move(str(tmp_final), str(final_dest))
+            state.mark_completed(tid, f"{safe}.{audio_format}")
+            return f"OK [alt-source] {label}"
+        except Exception as e:
+            state.mark_failed(tid, f"move_error: {e}")
+            return f"FAIL [save] {label}: {e}"
 
     try:
-        tmp_final = download_audio(video, tmp_no_ext, audio_format, audio_quality)
+        tmp_final = download_audio(video, tmp_no_ext, audio_format, audio_quality,
+                                   alt_query=alt_query)
     except Exception as e:
         for ext in (audio_format, "webm", "m4a", "mp4", "opus", "part"):
-            p = tmp_no_ext.with_suffix(f".{ext}")
+            p = _with_ext(tmp_no_ext, ext)
             if p.exists():
                 try: p.unlink()
                 except OSError: pass
