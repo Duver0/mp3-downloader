@@ -34,8 +34,8 @@ SONGS_PATH = DATA_DIR / "songs.json"
 TMP_DOWNLOAD_DIR = DATA_DIR / "tmp"
 
 PORT = 8080
-HOST = "127.0.0.1"
-DEFAULT_FOLDER = str(Path.home() / "Downloads" / "Liked Songs")
+HOST = "0.0.0.0" if os.environ.get("DEFAULT_DOWNLOAD_FOLDER") else "127.0.0.1"
+DEFAULT_FOLDER = os.environ.get("DEFAULT_DOWNLOAD_FOLDER") or str(Path.home() / "Downloads" / "Liked Songs")
 
 DATA_DIR.mkdir(exist_ok=True)
 TMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -776,10 +776,13 @@ def _ffmpeg_convert(src: Path, dest: Path, audio_format: str) -> None:
     codec = "libmp3lame" if audio_format == "mp3" else (
         "libvorbis" if audio_format == "ogg" else (
         "libopus" if audio_format == "opus" else "aac"))
+    kwargs: dict = {"capture_output": True, "check": True}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
     subprocess.run([
         "ffmpeg", "-y", "-i", str(src),
         "-vn", "-acodec", codec, "-q:a", "2", str(dest)
-    ], capture_output=True, check=True)
+    ], **kwargs)
 
 
 def download_audio_invidious(video_id: str, out_no_ext: Path,
