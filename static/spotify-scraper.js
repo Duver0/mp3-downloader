@@ -20,6 +20,7 @@ const spotifyScraper = (function() {
                 let position = 0;
                 let title = '';
                 let artist = '';
+                let album = '';
                 
                 cells.forEach(cell => {
                     const colIndex = parseInt(cell.getAttribute('aria-colindex'));
@@ -27,15 +28,18 @@ const spotifyScraper = (function() {
                         const span = cell.querySelector('span[data-encore-id="text"]');
                         position = parseInt(span?.innerText?.trim()) || 0;
                     } else if (colIndex === 2) {
-                        title = cell.querySelector('a [data-encore-id="text"]')?.innerText?.trim() || '';
+                        const links = cell.querySelectorAll('a');
+                        title = links[0]?.innerText?.trim() || '';
+                        if (links.length > 1) {
+                            artist = Array.from(links).slice(1).map(l => l.innerText?.trim()).filter(Boolean).join(', ');
+                        }
                     } else if (colIndex === 3) {
-                        artist = cell.querySelector('a')?.innerText?.trim() || 
-                                 cell.querySelector('[data-encore-id="text"] a')?.innerText?.trim() || '';
+                        album = cell.querySelector('a')?.innerText?.trim() || '';
                     }
                 });
                 
                 if (title && artist && position > 0) {
-                    currentSongs.push({ position, title, artist });
+                    currentSongs.push({ position, title, artist, album });
                 }
             } catch (e) {}
         });
@@ -120,10 +124,10 @@ const spotifyScraper = (function() {
     }
     
     function copyAndShow() {
-        const result = songs.map(s => s.title + ' - ' + s.artist).join('\n');
+        const result = songs.map(s => s.title + ' - ' + s.artist + ' || ' + s.album).join('\n');
         
         console.log('\n=== RESULTADO ===\n');
-        songs.forEach(s => console.log(s.title + ' - ' + s.artist));
+        songs.forEach(s => console.log(s.title + ' - ' + s.artist + ' || ' + s.album));
         console.log('\nTotal: ' + songs.length);
         
         const overlay = document.createElement('div');

@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -27,6 +27,9 @@ import yt_dlp
 from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, error as ID3Error
 from mutagen.mp3 import MP3
+
+class StopException(Exception):
+    pass
 
 # ─── Paths & constants ──────────────────────────────────────────────────────
 APP_DIR = Path(__file__).parent.resolve()
@@ -269,10 +272,12 @@ def resolve_spotify_track(track_id: str, session: requests.Session) -> Optional[
         html = r.text
         title_m = re.search(r'<meta property="og:title" content="([^"]+)"', html)
         desc_m = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+        img_m = re.search(r'<meta property="og:image" content="([^"]+)"', html)
         if not title_m:
             return None
         title = html_module.unescape(title_m.group(1))
         desc = html_module.unescape(desc_m.group(1)) if desc_m else ""
+        image_url = html_module.unescape(img_m.group(1)) if img_m else ""
         # description format examples:
         #   "Artist Name · Song · 2023"
         #   "Artist1, Artist2 · Song · 2023"
@@ -283,10 +288,34 @@ def resolve_spotify_track(track_id: str, session: requests.Session) -> Optional[
             "id": track_id,
             "name": title,
             "artists": [a.strip() for a in artist.split(",")] if artist else [],
+            "image_url": image_url,
             "duration_ms": 0,  # not available without API; YouTube ranking copes
         }
     except requests.RequestException:
         return None
+
+
+def search_album_art_via_itunes(artist: str, album: str) -> str:
+    """Search iTunes for album artwork. Returns URL or empty string."""
+    if not artist and not album:
+        return ""
+    term = f"{artist} {album}".strip()
+    if not term:
+        return ""
+    params = {"term": term, "entity": "song", "limit": 1}
+    try:
+        r = requests.get("https://itunes.apple.com/search", params=params,
+                         timeout=8, headers=HTTP_HEADERS)
+        if r.ok:
+            data = r.json()
+            results = data.get("results", [])
+            if results:
+                url = results[0].get("artworkUrl100", "")
+                if url:
+                    return url.replace("100x100bb", "1200x1200bb")
+    except Exception:
+        pass
+    return ""
 
 
 def parse_input_lines(text: str) -> tuple[list[str], list[str]]:
@@ -534,6 +563,7 @@ def _ytdlp_attempt(url: str, out_no_ext: Path,
             if attempt < 3:
                 wait = attempt * 5
                 time.sleep(wait)
+                _check_stop()
                 return _ytdlp_attempt(url, out_no_ext, audio_format, audio_quality,
                                       client, format_spec, attempt + 1)
         return e
@@ -546,6 +576,7 @@ def _ytdlp_try_clients(url: str, out_no_ext: Path,
     last_err: Optional[Exception] = None
     format_specs = ["bestaudio*", "bestaudio", "worstaudio", "best", "worst"]
     for client in clients:
+        _check_stop()
         for fmt in format_specs:
             err = _ytdlp_attempt(url, out_no_ext, audio_format, audio_quality, client, fmt)
             if err is None:
@@ -590,6 +621,7 @@ def download_from_alt_sources(query: str, out_no_ext: Path,
     """Try non-YouTube sources (SoundCloud) when YouTube fails."""
     errs: list[str] = []
     for prefix, label in (("scsearch", "SoundCloud"),):
+        _check_stop()
         err = _ytdlp_search_download(prefix, query, out_no_ext, audio_format, audio_quality)
         if err is None:
             try:
@@ -688,6 +720,7 @@ def download_audio_piped(video_id: str, out_no_ext: Path,
     last_err: Optional[str] = None
 
     for instance in PIPED_INSTANCES:
+        _check_stop()
         try:
             r = requests.get(f"{instance}/streams/{video_id}", timeout=8,
                              headers={"User-Agent": HTTP_HEADERS["User-Agent"]})
@@ -737,6 +770,7 @@ def _download_stream_to_file(url: str, dest: Path) -> None:
         r.raise_for_status()
         with dest.open("wb") as fh:
             for chunk in r.iter_content(chunk_size=64 * 1024):
+                _check_stop()
                 if chunk: fh.write(chunk)
 
 
@@ -753,23 +787,35 @@ def _ffmpeg_convert(src: Path, dest: Path, audio_format: str) -> None:
     ], **kwargs)
 
 
-def _download_thumbnail(video_id: str, dest: Path) -> bool:
-    for domain in ("i.ytimg.com", "img.youtube.com"):
-        for res in ("maxresdefault", "hqdefault", "mqdefault", "sddefault"):
-            url = f"https://{domain}/vi/{video_id}/{res}.jpg"
-            try:
-                r = requests.get(url, timeout=5,
-                                 headers={"User-Agent": HTTP_HEADERS["User-Agent"]})
-                if r.ok:
-                    dest.write_bytes(r.content)
-                    return True
-            except Exception:
-                continue
+def _download_thumbnail(dest: Path, video_id: str | None = None,
+                        image_url: str | None = None) -> bool:
+    if image_url:
+        try:
+            r = requests.get(image_url, timeout=8,
+                             headers={"User-Agent": HTTP_HEADERS["User-Agent"]})
+            if r.ok:
+                dest.write_bytes(r.content)
+                return True
+        except Exception:
+            pass
+    if video_id:
+        for domain in ("i.ytimg.com", "img.youtube.com"):
+            for res in ("maxresdefault", "hqdefault", "mqdefault", "sddefault"):
+                url = f"https://{domain}/vi/{video_id}/{res}.jpg"
+                try:
+                    r = requests.get(url, timeout=5,
+                                     headers={"User-Agent": HTTP_HEADERS["User-Agent"]})
+                    if r.ok:
+                        dest.write_bytes(r.content)
+                        return True
+                except Exception:
+                    continue
     return False
 
 
 def tag_audio_file(filepath: Path, title: str, artist: str,
-                   video_id: str | None = None) -> None:
+                   video_id: str | None = None, album: str = "",
+                   image_url: str | None = None) -> None:
     if filepath.suffix.lower() not in (".mp3", ".m4a"):
         return
     if not video_id and artist and title:
@@ -787,11 +833,14 @@ def tag_audio_file(filepath: Path, title: str, artist: str,
     audio.tags.add(TIT2(encoding=3, text=title))
     if artist:
         audio.tags.add(TPE1(encoding=3, text=artist))
+    if album:
+        audio.tags.add(TALB(encoding=3, text=album))
+    elif artist:
         audio.tags.add(TALB(encoding=3, text=artist))
-    if video_id:
+    if image_url or video_id:
         cover_path = filepath.with_suffix(".jpg")
         if not cover_path.exists():
-            _download_thumbnail(video_id, cover_path)
+            _download_thumbnail(cover_path, video_id=video_id, image_url=image_url)
         if cover_path.exists():
             with open(cover_path, "rb") as fh:
                 img_data = fh.read()
@@ -813,6 +862,7 @@ def download_audio_invidious(video_id: str, out_no_ext: Path,
     last_err: Optional[str] = None
 
     for instance in INVIDIOUS_INSTANCES:
+        _check_stop()
         try:
             r = requests.get(f"{instance}/api/v1/videos/{video_id}",
                              timeout=8,
@@ -863,19 +913,24 @@ def process_track(track: dict, dest_dir: Path, audio_format: str, audio_quality:
     errors: dict[str, str] = {}
 
     # ── Paso 1: YouTube (yt-dlp) ──
+    _check_stop()
     sync.emit_log(f"  🔍 Buscando en YouTube: {alt_query}", "info")
     video = find_best(track)
 
     if video:
+        _check_stop()
         sync.emit_log(f"  🎵 YouTube → {video.get('title', '?')}", "info")
         try:
             tmp_final = download_audio(video, tmp_no_ext, audio_format, audio_quality)
+            _check_stop()
             dest_dir.mkdir(parents=True, exist_ok=True)
             if final_dest.exists(): final_dest.unlink()
             shutil.move(str(tmp_final), str(final_dest))
-            tag_audio_file(final_dest, name, artist, video.get("id"))
+            tag_audio_file(final_dest, name, artist, video.get("id"), track.get("album", ""), track.get("image_url"))
             state.mark_completed(tid, f"{safe}.{audio_format}")
             return f"OK {label}"
+        except StopException:
+            raise
         except Exception as e:
             errors["youtube"] = str(e)
             sync.emit_log(f"  ⚠ Error descargando de YouTube: {e}", "warn")
@@ -889,16 +944,20 @@ def process_track(track: dict, dest_dir: Path, audio_format: str, audio_quality:
         sync.emit_log(f"  ⚠ Sin resultados en YouTube", "warn")
 
     # ── Paso 2: SoundCloud (yt-dlp) ──
+    _check_stop()
     sync.emit_log(f"  🔍 Buscando en fuentes alternativas: {alt_query}", "info")
     try:
         tmp_final = download_from_alt_sources(alt_query, tmp_no_ext,
                                               audio_format, audio_quality)
+        _check_stop()
         dest_dir.mkdir(parents=True, exist_ok=True)
         if final_dest.exists(): final_dest.unlink()
         shutil.move(str(tmp_final), str(final_dest))
-        tag_audio_file(final_dest, name, artist)
+        tag_audio_file(final_dest, name, artist, album=track.get("album", ""), image_url=track.get("image_url"))
         state.mark_completed(tid, f"{safe}.{audio_format}")
         return f"OK [alt] {label}"
+    except StopException:
+        raise
     except Exception as e:
         errors["alt_sources"] = str(e)
 
@@ -906,6 +965,11 @@ def process_track(track: dict, dest_dir: Path, audio_format: str, audio_quality:
     error_detail = " | ".join(f"{k}: {v}" for k, v in errors.items())
     state.mark_failed(tid, error_detail)
     return f"FAIL {label}: {error_detail}"
+
+
+def _check_stop():
+    if sync.should_stop:
+        raise StopException
 
 
 # ─── Resolve thread (background) ────────────────────────────────────────────
@@ -938,15 +1002,20 @@ def run_resolve(text: str):
         for text_line in plain:
             tid = "txt:" + re.sub(r"\W+", "_", text_line.lower())[:100]
             if tid not in existing:
-                # naive split by " - " for title/artist
                 parts = [p.strip() for p in text_line.split(" - ", 1)]
                 if len(parts) == 2:
-                    name, artist = parts
+                    name, artist_album = parts
+                    aa = [p.strip() for p in artist_album.split(" || ", 1)]
+                    artist = aa[0]
+                    album = aa[1] if len(aa) > 1 else ""
                 else:
-                    name, artist = text_line, ""
+                    name, artist, album = text_line, "", ""
+                image_url = search_album_art_via_itunes(artist, album or name)
                 new_songs.append({
                     "id": tid, "name": name,
                     "artists": [artist] if artist else [],
+                    "album": album,
+                    "image_url": image_url,
                     "duration_ms": 0, "source": "text",
                 })
             with resolve_lock:
@@ -964,7 +1033,7 @@ def run_resolve(text: str):
             return tid, track, None if track else "no metadata"
 
         if track_ids:
-            with ThreadPoolExecutor(max_workers=8) as ex:
+            with ThreadPoolExecutor(max_workers=20) as ex:
                 futures = [ex.submit(resolve_one, tid) for tid in track_ids]
                 for fut in as_completed(futures):
                     tid, track, err = fut.result()
@@ -1029,19 +1098,27 @@ def run_sync(retry_failed: bool = False):
                 return None
             try:
                 return process_track(track, dest, audio_format, audio_quality)
+            except StopException:
+                return None
             except Exception as e:
                 result = f"FAIL [unexpected] {track.get('name','?')}: {e}"
                 state.mark_failed(track["id"], f"unexpected: {e}")
                 return result
 
-        with ThreadPoolExecutor(max_workers=15) as executor:
+        executor = ThreadPoolExecutor(max_workers=15)
+        try:
             futures = {executor.submit(process_one, track): track for track in songs}
             for future in as_completed(futures):
                 if sync.should_stop:
                     sync.emit_log("⏹  Detenido por el usuario.", "warn")
+                    executor.shutdown(wait=False, cancel_futures=True)
                     break
                 try:
                     result = future.result()
+                except StopException:
+                    continue
+                except CancelledError:
+                    continue
                 except Exception as e:
                     track = futures[future]
                     result = f"FAIL [unexpected] {track.get('name','?')}: {e}"
@@ -1063,6 +1140,8 @@ def run_sync(retry_failed: bool = False):
                 with sync._lock:
                     sync.processed = sync.ok + sync.failed + sync.skipped
                 sync.emit_status()
+        finally:
+            executor.shutdown(wait=not sync.should_stop)
 
         sync.emit_log(f"⏱  Terminado: {sync.ok} ok / {sync.failed} fail / {sync.skipped} skip", "info")
     except Exception as e:
