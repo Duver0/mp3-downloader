@@ -1,0 +1,10 @@
+services:
+  mp4-downloader:
+    build: .
+    container_name: mp4-downloader
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/downloads
+    restart: unless-stopped

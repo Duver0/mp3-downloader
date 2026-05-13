@@ -21,9 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import random
 import requests
 import yt_dlp
 from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, error as ID3Error
+from mutagen.mp3 import MP3
 
 # ─── Paths & constants ──────────────────────────────────────────────────────
 APP_DIR = Path(__file__).parent.resolve()
@@ -454,63 +457,30 @@ def score_match(video: dict, track: dict) -> float:
     return s
 
 
-def find_best(track: dict, retry_name_only: bool = False) -> Optional[dict]:
+def find_best(track: dict) -> Optional[dict]:
     artist = track["artists"][0] if track["artists"] else ""
     name = track["name"]
+    query = f"{artist} {name}".strip() or name
 
-    # Check cache first (before search)
-    if not retry_name_only and artist and name:
+    if artist and name:
         cached = youtube_cache.get(artist, name)
         if cached:
             return cached
 
-    queries = []
-    if not retry_name_only and artist and name:
-        queries.append(f"{artist} {name}".strip())
-    if name:
-        queries.append(name)
-    if not retry_name_only and name and artist:
-        queries.append(f"{artist} {name} audio".strip())
-    if name:
-        queries.append(f"{name} audio".strip())
-    if name:
-        queries.append(f"{name} official audio".strip())
+    results = yt_search(query, n=1)
+    if results:
+        result = results[0]
+        if artist and name:
+            youtube_cache.set(artist, name, result)
+        return result
 
-    seen, candidates = set(), []
-    for q in queries:
-        if not q: continue
-        searchers = [yt_search_flat, yt_search_invidious] if retry_name_only \
-                    else [yt_search, yt_search_invidious, yt_search_flat]
-        for searcher in searchers:
-            for c in searcher(q, n=5):
-                cid = c.get("id")
-                if cid and cid not in seen:
-                    seen.add(cid); candidates.append(c)
-            if candidates: break
-        if len(candidates) >= 5: break
-    if not candidates:
-        sync.emit_log(f"  ⚠ búsqueda sin resultados para '{name}' (artist: '{artist}')", "warn")
-        return None
-    scored = sorted(((score_match(c, track), c) for c in candidates),
-                    key=lambda x: x[0], reverse=True)
-    best_s, best = scored[0]
-    result = best if best_s >= 20 else None
-    if not result:
-        sync.emit_log(
-            f"  ⚠ '{name}': mejor coincidencia '{best.get('title','?')}' "
-            f"score {best_s:.1f} < umbral 20", "warn")
+    if name != query:
+        sync.emit_log(f"  ↻ sin resultados con artista, probando solo nombre...", "info")
+        results = yt_search(name, n=1)
+        if results:
+            return results[0]
 
-    # Store in cache if found
-    if result and not retry_name_only and artist and name:
-        youtube_cache.set(artist, name, result)
-
-    return result
-
-
-BOT_SIGNALS = ("age", "sign in", "bot", "confirm you", "captcha",
-               "403", "forbidden", "unavailable", "private video",
-               "members-only", "po_token", "format is not available",
-               "requested format")
+    return None
 
 
 def _with_ext(out_no_ext: Path, ext: str) -> Path:
@@ -529,9 +499,15 @@ class _SilentLogger:
 _silent_logger = _SilentLogger()
 
 
+BOT_SIGNALS = ("age", "sign in", "bot", "confirm you", "captcha",
+               "403", "forbidden", "unavailable", "private video",
+               "members-only", "po_token", "format is not available",
+               "requested format", "too many requests", "429")
+
 def _ytdlp_attempt(url: str, out_no_ext: Path,
                    audio_format: str, audio_quality: str,
-                   client: str, format_spec: str) -> Optional[Exception]:
+                   client: str, format_spec: str,
+                   attempt: int = 1) -> Optional[Exception]:
     opts = {
         "format": format_spec,
         "outtmpl": str(out_no_ext) + ".%(ext)s",
@@ -545,16 +521,21 @@ def _ytdlp_attempt(url: str, out_no_ext: Path,
         "retries": 2, "fragment_retries": 2,
         "extractor_args": {"youtube": {
             "player_client": [client],
-            "formats": "missing_pot",
         }},
         "http_headers": {"User-Agent": HTTP_HEADERS["User-Agent"]},
-        "ignore_no_formats_error": False,
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
         return None
     except Exception as e:
+        err_msg = str(e).lower()
+        if any(s in err_msg for s in ("sign in", "429", "too many requests", "bot")):
+            if attempt < 3:
+                wait = attempt * 5
+                time.sleep(wait)
+                return _ytdlp_attempt(url, out_no_ext, audio_format, audio_quality,
+                                      client, format_spec, attempt + 1)
         return e
 
 
@@ -563,7 +544,7 @@ def _ytdlp_try_clients(url: str, out_no_ext: Path,
                        clients: list[str]) -> Optional[Exception]:
     """Try multiple yt-dlp player_clients with progressive format fallback."""
     last_err: Optional[Exception] = None
-    format_specs = ["bestaudio/best", "bestaudio*/best*", "best", "worst"]
+    format_specs = ["bestaudio*", "bestaudio", "worstaudio", "best", "worst"]
     for client in clients:
         for fmt in format_specs:
             err = _ytdlp_attempt(url, out_no_ext, audio_format, audio_quality, client, fmt)
@@ -606,9 +587,9 @@ def _ytdlp_search_download(search_prefix: str, query: str,
 
 def download_from_alt_sources(query: str, out_no_ext: Path,
                               audio_format: str, audio_quality: str) -> Path:
-    """Try non-YouTube sources (SoundCloud, Bandcamp) when YouTube is blocked."""
+    """Try non-YouTube sources (SoundCloud) when YouTube fails."""
     errs: list[str] = []
-    for prefix, label in (("scsearch", "SoundCloud"), ("bcsearch", "Bandcamp")):
+    for prefix, label in (("scsearch", "SoundCloud"),):
         err = _ytdlp_search_download(prefix, query, out_no_ext, audio_format, audio_quality)
         if err is None:
             try:
@@ -621,15 +602,17 @@ def download_from_alt_sources(query: str, out_no_ext: Path,
 
 
 def download_audio(video: dict, out_no_ext: Path,
-                   audio_format: str, audio_quality: str,
-                   alt_query: Optional[str] = None) -> Path:
+                   audio_format: str, audio_quality: str) -> Path:
     vid = video.get("id")
     url = video.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None)
-    if not url: raise ValueError("video sin URL")
+    if not url:
+        raise ValueError("video sin URL")
 
     final = _with_ext(out_no_ext, audio_format)
     if final.exists():
         return final
+
+    time.sleep(random.uniform(0.5, 2.0))
 
     clients = ["tv_simply", "tv_embedded", "web_embedded", "ios", "mweb",
                "web_safari", "android_vr", "web"]
@@ -638,28 +621,13 @@ def download_audio(video: dict, out_no_ext: Path,
         return final if final.exists() else _locate_downloaded(out_no_ext, audio_format)
 
     err_msg = str(err).lower()
-    if not vid or not any(s in err_msg for s in BOT_SIGNALS):
-        raise err
-
-    fallback_errs: list[str] = [f"yt-dlp: {err}"]
-
-    for fallback_fn, label in (
-        (download_audio_invidious, "Invidious"),
-        (download_audio_piped, "Piped"),
-    ):
+    if vid and any(s in err_msg for s in BOT_SIGNALS):
         try:
-            return fallback_fn(vid, out_no_ext, audio_format, audio_quality)
-        except Exception as e:
-            fallback_errs.append(f"{label}: {e}")
-            continue
+            return download_audio_invidious(vid, out_no_ext, audio_format, audio_quality)
+        except Exception as inv_err:
+            raise ValueError(f"yt-dlp: {err} | Invidious: {inv_err}") from err
 
-    if alt_query:
-        try:
-            return download_from_alt_sources(alt_query, out_no_ext, audio_format, audio_quality)
-        except Exception as e:
-            fallback_errs.append(str(e))
-
-    raise ValueError(f"todos los métodos fallaron → {' | '.join(fallback_errs)}") from err
+    raise err
 
 
 def _locate_downloaded(out_no_ext: Path, audio_format: str) -> Path:
@@ -785,6 +753,58 @@ def _ffmpeg_convert(src: Path, dest: Path, audio_format: str) -> None:
     ], **kwargs)
 
 
+def _download_thumbnail(video_id: str, dest: Path) -> bool:
+    for domain in ("i.ytimg.com", "img.youtube.com"):
+        for res in ("maxresdefault", "hqdefault", "mqdefault", "sddefault"):
+            url = f"https://{domain}/vi/{video_id}/{res}.jpg"
+            try:
+                r = requests.get(url, timeout=5,
+                                 headers={"User-Agent": HTTP_HEADERS["User-Agent"]})
+                if r.ok:
+                    dest.write_bytes(r.content)
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def tag_audio_file(filepath: Path, title: str, artist: str,
+                   video_id: str | None = None) -> None:
+    if filepath.suffix.lower() not in (".mp3", ".m4a"):
+        return
+    if not video_id and artist and title:
+        cached = youtube_cache.get(artist, title)
+        if cached:
+            video_id = cached.get("id")
+    try:
+        audio = MP3(str(filepath))
+    except Exception:
+        return
+    try:
+        audio.add_tags()
+    except ID3Error:
+        pass
+    audio.tags.add(TIT2(encoding=3, text=title))
+    if artist:
+        audio.tags.add(TPE1(encoding=3, text=artist))
+        audio.tags.add(TALB(encoding=3, text=artist))
+    if video_id:
+        cover_path = filepath.with_suffix(".jpg")
+        if not cover_path.exists():
+            _download_thumbnail(video_id, cover_path)
+        if cover_path.exists():
+            with open(cover_path, "rb") as fh:
+                img_data = fh.read()
+            mime = "image/jpeg"
+            audio.tags.add(APIC(
+                encoding=3, mime=mime, type=3, desc="Cover", data=img_data,
+            ))
+    try:
+        audio.save()
+    except Exception:
+        pass
+
+
 def download_audio_invidious(video_id: str, out_no_ext: Path,
                              audio_format: str, audio_quality: str) -> Path:
     """Fallback: fetch stream URL from Invidious, download via HTTP, convert with ffmpeg."""
@@ -836,57 +856,56 @@ def process_track(track: dict, dest_dir: Path, audio_format: str, audio_quality:
     sync.current = label
     sync.emit_status()
 
-    video = find_best(track)
-    if not video:
-        if track["artists"] and track["artists"][0]:
-            sync.emit_log(f"  ↻ reintentando solo con nombre...", "info")
-            video = find_best(track, retry_name_only=True)
-
     safe = sanitize(name)
     tmp_no_ext = TMP_DOWNLOAD_DIR / safe
     final_dest = dest_dir / f"{safe}.{audio_format}"
     alt_query = f"{artist} {name}".strip() or name
+    errors: dict[str, str] = {}
 
-    if not video:
-        sync.emit_log(f"  ↻ YouTube sin match, probando SoundCloud/Bandcamp...", "info")
+    # ── Paso 1: YouTube (yt-dlp) ──
+    sync.emit_log(f"  🔍 Buscando en YouTube: {alt_query}", "info")
+    video = find_best(track)
+
+    if video:
+        sync.emit_log(f"  🎵 YouTube → {video.get('title', '?')}", "info")
         try:
-            tmp_final = download_from_alt_sources(alt_query, tmp_no_ext,
-                                                  audio_format, audio_quality)
-        except Exception as e:
-            state.mark_failed(tid, f"no_match_found: {e}")
-            return f"FAIL [search] {label}: {e}"
-        try:
+            tmp_final = download_audio(video, tmp_no_ext, audio_format, audio_quality)
             dest_dir.mkdir(parents=True, exist_ok=True)
             if final_dest.exists(): final_dest.unlink()
             shutil.move(str(tmp_final), str(final_dest))
+            tag_audio_file(final_dest, name, artist, video.get("id"))
             state.mark_completed(tid, f"{safe}.{audio_format}")
-            return f"OK [alt-source] {label}"
+            return f"OK {label}"
         except Exception as e:
-            state.mark_failed(tid, f"move_error: {e}")
-            return f"FAIL [save] {label}: {e}"
+            errors["youtube"] = str(e)
+            sync.emit_log(f"  ⚠ Error descargando de YouTube: {e}", "warn")
+            for ext in (audio_format, "webm", "m4a", "mp4", "opus", "part"):
+                p = _with_ext(tmp_no_ext, ext)
+                if p.exists():
+                    try: p.unlink()
+                    except OSError: pass
+    else:
+        errors["youtube"] = "sin resultados"
+        sync.emit_log(f"  ⚠ Sin resultados en YouTube", "warn")
 
+    # ── Paso 2: SoundCloud (yt-dlp) ──
+    sync.emit_log(f"  🔍 Buscando en fuentes alternativas: {alt_query}", "info")
     try:
-        tmp_final = download_audio(video, tmp_no_ext, audio_format, audio_quality,
-                                   alt_query=alt_query)
-    except Exception as e:
-        for ext in (audio_format, "webm", "m4a", "mp4", "opus", "part"):
-            p = _with_ext(tmp_no_ext, ext)
-            if p.exists():
-                try: p.unlink()
-                except OSError: pass
-        state.mark_failed(tid, f"download_error: {e}")
-        return f"FAIL [download] {label}: {e}"
-
-    try:
+        tmp_final = download_from_alt_sources(alt_query, tmp_no_ext,
+                                              audio_format, audio_quality)
         dest_dir.mkdir(parents=True, exist_ok=True)
         if final_dest.exists(): final_dest.unlink()
         shutil.move(str(tmp_final), str(final_dest))
+        tag_audio_file(final_dest, name, artist)
+        state.mark_completed(tid, f"{safe}.{audio_format}")
+        return f"OK [alt] {label}"
     except Exception as e:
-        state.mark_failed(tid, f"move_error: {e}")
-        return f"FAIL [save] {label}: {e}"
+        errors["alt_sources"] = str(e)
 
-    state.mark_completed(tid, f"{safe}.{audio_format}")
-    return f"OK {label}"
+    # ── Todo falló ──
+    error_detail = " | ".join(f"{k}: {v}" for k, v in errors.items())
+    state.mark_failed(tid, error_detail)
+    return f"FAIL {label}: {error_detail}"
 
 
 # ─── Resolve thread (background) ────────────────────────────────────────────
@@ -1015,7 +1034,7 @@ def run_sync(retry_failed: bool = False):
                 state.mark_failed(track["id"], f"unexpected: {e}")
                 return result
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=15) as executor:
             futures = {executor.submit(process_one, track): track for track in songs}
             for future in as_completed(futures):
                 if sync.should_stop:

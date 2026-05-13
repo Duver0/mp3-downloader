@@ -128,22 +128,26 @@ Hey Jude - The Beatles"></textarea>
   <script>
     const $ = (id) => document.getElementById(id);
 
+    function fallbackCopy(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      alert('✅ Script copiado al portapapeles\n\nPégalo en la consola del navegador (F12)');
+    }
+
     async function copyScriptFromFile() {
       try {
         const response = await fetch('/static/spotify-scraper.js');
         const scriptContent = await response.text();
 
-        navigator.clipboard.writeText(scriptContent).then(() => {
-          alert('✅ Script copiado al portapapeles\n\nPégalo en la consola del navegador (F12)');
-        }).catch(() => {
-          const ta = document.createElement('textarea');
-          ta.value = scriptContent;
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
-          alert('✅ Script copiado al portapapeles\n\nPégalo en la consola del navegador (F12)');
-        });
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          navigator.clipboard.writeText(scriptContent).catch(() => fallbackCopy(scriptContent));
+        } else {
+          fallbackCopy(scriptContent);
+        }
       } catch (e) {
         alert('❌ Error al cargar el script');
       }
@@ -176,11 +180,6 @@ Hey Jude - The Beatles"></textarea>
         progBox.hidden = false;
         rpLog.innerHTML = '';
 
-        const r = await postJSON('/api/songs/load', { text });
-        if (r.error) {
-          rpLog.innerHTML = '<div class="log-error">' + r.error + '</div>';
-          return;
-        }
         const es = new EventSource('/api/sync/stream');
         es.onmessage = (ev) => {
           const evt = JSON.parse(ev.data);
@@ -200,6 +199,12 @@ Hey Jude - The Beatles"></textarea>
           }
         };
         es.onerror = () => { };
+
+        const r = await postJSON('/api/songs/load', { text });
+        if (r.error) {
+          es.close();
+          rpLog.innerHTML = '<div class="log-error">' + r.error + '</div>';
+        }
       });
 
       const btnClear = $('btn-clear');

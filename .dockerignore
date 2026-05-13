@@ -1,0 +1,9 @@
+.venv
+__pycache__
+.git
+.gitignore
+readme.md
+CLAUDE.md
+docs
+data
+downloads
