@@ -1,7 +1,7 @@
 services:
-  mp4-downloader:
+  mp3-downloader:
     build: .
-    container_name: mp4-downloader
+    container_name: mp3-downloader
     ports:
       - "8080:8080"
     volumes:

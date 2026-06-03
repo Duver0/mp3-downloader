@@ -22,6 +22,8 @@ const spotifyScraper = (function() {
                 let artist = '';
                 let album = '';
                 
+                let cover = '';
+                
                 cells.forEach(cell => {
                     const colIndex = parseInt(cell.getAttribute('aria-colindex'));
                     if (colIndex === 1) {
@@ -38,8 +40,13 @@ const spotifyScraper = (function() {
                     }
                 });
                 
+                const img = row.querySelector('img');
+                if (img?.src) {
+                    cover = img.src.replace('ab67616d00004851', 'ab67616d0000b273');
+                }
+                
                 if (title && artist && position > 0) {
-                    currentSongs.push({ position, title, artist, album });
+                    currentSongs.push({ position, title, artist, album, cover });
                 }
             } catch (e) {}
         });
@@ -124,10 +131,10 @@ const spotifyScraper = (function() {
     }
     
     function copyAndShow() {
-        const result = songs.map(s => s.title + ' - ' + s.artist + ' || ' + s.album).join('\n');
+        const result = songs.map(s => s.title + ' - ' + s.artist + ' || ' + s.album + ' || ' + s.cover).join('\n');
         
         console.log('\n=== RESULTADO ===\n');
-        songs.forEach(s => console.log(s.title + ' - ' + s.artist + ' || ' + s.album));
+        songs.forEach(s => console.log(s.title + ' - ' + s.artist + ' || ' + s.album + ' || ' + s.cover));
         console.log('\nTotal: ' + songs.length);
         
         const overlay = document.createElement('div');

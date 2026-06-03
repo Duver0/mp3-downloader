@@ -665,7 +665,7 @@ def download_audio(video: dict, out_no_ext: Path,
 def _locate_downloaded(out_no_ext: Path, audio_format: str) -> Path:
     final = _with_ext(out_no_ext, audio_format)
     if final.exists(): return final
-    for ext in (audio_format, "webm", "m4a", "mp4", "ogg", "opus", "flac", "mp3", "aac"):
+    for ext in (audio_format, "webm", "m4a", "ogg", "opus", "flac", "mp3", "aac"):
         p = _with_ext(out_no_ext, ext)
         if p.exists():
             if ext != audio_format:
@@ -934,7 +934,7 @@ def process_track(track: dict, dest_dir: Path, audio_format: str, audio_quality:
         except Exception as e:
             errors["youtube"] = str(e)
             sync.emit_log(f"  ⚠ Error descargando de YouTube: {e}", "warn")
-            for ext in (audio_format, "webm", "m4a", "mp4", "opus", "part"):
+            for ext in (audio_format, "webm", "m4a", "opus", "part"):
                 p = _with_ext(tmp_no_ext, ext)
                 if p.exists():
                     try: p.unlink()
@@ -1105,7 +1105,7 @@ def run_sync(retry_failed: bool = False):
                 state.mark_failed(track["id"], f"unexpected: {e}")
                 return result
 
-        executor = ThreadPoolExecutor(max_workers=15)
+        executor = ThreadPoolExecutor(max_workers=20)
         try:
             futures = {executor.submit(process_one, track): track for track in songs}
             for future in as_completed(futures):
