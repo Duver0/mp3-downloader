@@ -1004,13 +1004,14 @@ def run_resolve(text: str):
             if tid not in existing:
                 parts = [p.strip() for p in text_line.split(" - ", 1)]
                 if len(parts) == 2:
-                    name, artist_album = parts
-                    aa = [p.strip() for p in artist_album.split(" || ", 1)]
+                    name, artist_rest = parts
+                    aa = [p.strip() for p in artist_rest.split(" || ")]
                     artist = aa[0]
                     album = aa[1] if len(aa) > 1 else ""
+                    cover_url = aa[2] if len(aa) > 2 else ""
                 else:
-                    name, artist, album = text_line, "", ""
-                image_url = search_album_art_via_itunes(artist, album or name)
+                    name, artist, album, cover_url = text_line, "", "", ""
+                image_url = cover_url or search_album_art_via_itunes(artist, album or name)
                 new_songs.append({
                     "id": tid, "name": name,
                     "artists": [artist] if artist else [],
