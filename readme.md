@@ -105,6 +105,30 @@ Ejecutados en la consola del navegador mientras el scraper corre:
 
 ---
 
+## Sincronizar a YouTube (opcional)
+
+Puedes agregar tus canciones a una playlist privada de YouTube en vez de descargarlas como MP3.
+
+### Configurar Google Cloud
+
+1. Ve a [Google Cloud Console](https://console.cloud.google.com) → crea un proyecto nuevo
+2. **APIs & Services → Library** → busca y habilita **YouTube Data API v3**
+3. **Credentials → Create Credentials → OAuth 2.0 Client ID**
+   - Tipo: **Web application**
+   - Authorized redirect URIs: `http://localhost:8080/auth/callback`
+4. Descarga el JSON de credenciales y guárdalo como `static/client_secret.json`
+
+> ⚠️ `static/client_secret.json` no se borra con el botón "Limpiar todo" de la app, a diferencia de los archivos en `data/`.
+
+### Usar
+
+1. Abre la app → Dashboard
+2. Haz clic en **"🔗 Conectar YouTube"** → autoriza en el navegador
+3. Una vez conectado, haz clic en **"📤 Sincronizar a playlist"**
+4. La app crea una playlist privada "Liked Songs" y agrega cada canción usando el mejor video encontrado en YouTube
+
+---
+
 ## Instalación sin Docker
 
 <details>

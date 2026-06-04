@@ -29,18 +29,31 @@
           <div class="stat-value" id="stat-pending">—</div>
           <div class="stat-label">Pendientes</div>
         </div>
+        <div class="stat">
+          <div class="stat-value" id="stat-yt-pending">—</div>
+          <div class="stat-label">YouTube</div>
+        </div>
       </div>
 
       <div class="dashboard-grid">
         <div class="main-col">
           <div class="card hero">
             <div id="hero-idle">
-              <h2>Listo para sincronizar</h2>
-              <p class="muted">Voy a buscar canciones nuevas en tus favoritos de Spotify y descargarlas en:</p>
+              <h2>Descargar MP3</h2>
               <p class="folder"><code>{{ cfg.get('download_folder') }}</code></p>
               <div class="actions">
                 <button id="btn-start" class="btn primary big">▶ Sincronizar ahora</button>
                 <button id="btn-retry" class="btn ghost">↻ Reintentar fallidas</button>
+              </div>
+              <hr class="divider">
+              <h2>YouTube Playlist</h2>
+              <div id="yt-auth-section">
+                <p class="muted" id="yt-status-text">Verificando conexión...</p>
+              </div>
+              <div class="actions" id="yt-actions">
+                <button id="btn-yt-connect" class="btn ghost">🔗 Conectar YouTube</button>
+                <button id="btn-yt-sync" class="btn primary big" hidden>📤 Sincronizar a playlist</button>
+                <button id="btn-yt-logout" class="btn ghost" hidden>Desconectar</button>
               </div>
             </div>
 
@@ -52,6 +65,16 @@
               </div>
               <p id="run-counts" class="muted">0 / 0</p>
               <button id="btn-stop" class="btn ghost">⏹ Detener</button>
+            </div>
+
+            <div id="hero-yt-running" hidden>
+              <h2 id="yt-run-title">Sincronizando a YouTube...</h2>
+              <p id="yt-run-current" class="current">—</p>
+              <div class="progress">
+                <div class="progress-bar" id="yt-progress-bar"></div>
+              </div>
+              <p id="yt-run-counts" class="muted">0 / 0</p>
+              <button id="btn-yt-stop" class="btn ghost">⏹ Detener</button>
             </div>
           </div>
 
@@ -82,6 +105,7 @@ const $ = (id) => document.getElementById(id);
 const logEl = $('log');
 const heroIdle = $('hero-idle');
 const heroRunning = $('hero-running');
+const heroYtRunning = $('hero-yt-running');
 
 function appendLog(msg, level='info') {
   const ts = new Date().toLocaleTimeString('es-ES', {hour12: false});
@@ -105,6 +129,7 @@ function updateUI(s) {
   if (s.is_running) {
     heroIdle.hidden = true;
     heroRunning.hidden = false;
+    heroYtRunning.hidden = true;
     $('run-current').innerText = s.current || '—';
     const pct = s.total ? Math.round(100 * s.processed / s.total) : 0;
     $('progress-bar').style.width = pct + '%';
@@ -115,6 +140,26 @@ function updateUI(s) {
     heroIdle.hidden = false;
     heroRunning.hidden = true;
     $('stat-pending').innerText = s.total ? Math.max(0, s.total - s.processed) : '—';
+  }
+}
+
+function updateYtUI(s) {
+  if (s.is_running) {
+    heroIdle.hidden = true;
+    heroRunning.hidden = true;
+    heroYtRunning.hidden = false;
+    $('yt-run-current').innerText = s.current || '—';
+    const pct = s.total ? Math.round(100 * s.processed / s.total) : 0;
+    $('yt-progress-bar').style.width = pct + '%';
+    $('yt-run-counts').innerText =
+      `${s.processed} / ${s.total}  ·  ${s.ok} ok · ${s.failed} fail · ${s.skipped} skip`;
+    $('stat-yt-pending').innerText = Math.max(0, s.total - s.processed);
+  } else {
+    heroYtRunning.hidden = true;
+    if (!heroRunning.hidden) return;
+    heroIdle.hidden = false;
+    $('stat-yt-pending').innerText = s.processed ? `${s.ok} / ${s.total}` : '—';
+    checkYtAuth();
   }
 }
 
@@ -134,6 +179,43 @@ function connectStream() {
   };
 }
 connectStream();
+
+function connectYtStream() {
+  const es = new EventSource('/api/sync-youtube/stream');
+  es.onmessage = (e) => {
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'status') updateYtUI(evt);
+    else if (evt.type === 'log') appendLog(evt.message, evt.level || 'info');
+    else if (evt.type === 'done') {
+      fetch('/api/sync-youtube/status').then(r => r.json()).then(updateYtUI);
+    }
+  };
+  es.onerror = () => {
+    es.close();
+    setTimeout(connectYtStream, 2000);
+  };
+}
+connectYtStream();
+
+async function checkYtAuth() {
+  const r = await fetch('/auth/status');
+  const d = await r.json();
+  const statusText = $('yt-status-text');
+  const connectBtn = $('btn-yt-connect');
+  const syncBtn = $('btn-yt-sync');
+  const logoutBtn = $('btn-yt-logout');
+  if (d.connected) {
+    statusText.innerHTML = '✅ Conectado: ' + escapeHtml(d.email);
+    connectBtn.hidden = true;
+    syncBtn.hidden = false;
+    logoutBtn.hidden = false;
+  } else {
+    statusText.innerText = '🔗 Conecta tu cuenta de YouTube';
+    connectBtn.hidden = false;
+    syncBtn.hidden = true;
+    logoutBtn.hidden = true;
+  }
+}
 
 async function postJSON(url, data) {
   const r = await fetch(url, {
@@ -155,6 +237,21 @@ $('btn-retry').addEventListener('click', async () => {
 $('btn-stop').addEventListener('click', async () => {
   await postJSON('/api/sync/stop');
 });
+$('btn-yt-connect').addEventListener('click', () => {
+  location.href = '/auth/login';
+});
+$('btn-yt-sync').addEventListener('click', async () => {
+  const r = await postJSON('/api/sync-youtube/start');
+  if (r.error) appendLog('Error: ' + r.error, 'error');
+});
+$('btn-yt-stop').addEventListener('click', async () => {
+  await postJSON('/api/sync-youtube/stop');
+});
+$('btn-yt-logout').addEventListener('click', async () => {
+  await postJSON('/auth/logout');
+  checkYtAuth();
+  appendLog('🔌 YouTube desconectado', 'info');
+});
 $('btn-clear-log').addEventListener('click', () => { logEl.innerHTML = ''; });
 $('btn-open').addEventListener('click', async () => {
   await postJSON('/api/folder/open');
@@ -172,6 +269,7 @@ $('btn-clear-data').addEventListener('click', async () => {
 });
 
 fetch('/api/sync/status').then(r => r.json()).then(updateUI);
+checkYtAuth();
 </script>
 </body>
 </html>

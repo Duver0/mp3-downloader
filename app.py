@@ -4,11 +4,14 @@ Run: python app.py  → opens http://127.0.0.1:8080
 """
 from __future__ import annotations
 
+import os
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
 import html as html_module
 import json
 import logging
-import os
 import queue
+import random
 import re
 import shutil
 import subprocess
@@ -21,10 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import random
 import requests
 import yt_dlp
 from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, error as ID3Error
 from mutagen.mp3 import MP3
 
@@ -45,6 +51,13 @@ DEFAULT_FOLDER = os.environ.get("DEFAULT_DOWNLOAD_FOLDER") or str(Path.home() / 
 
 DATA_DIR.mkdir(exist_ok=True)
 TMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+# ─── YouTube / Google OAuth ─────────────────────────────────────────────
+GOOGLE_CLIENT_SECRET_PATH = APP_DIR / "static" / "client_secret.json"
+YOUTUBE_TOKEN_PATH = DATA_DIR / "youtube_token.json"
+YOUTUBE_PLAYLIST_PATH = DATA_DIR / "youtube_playlist_id.json"
+YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube"]
+google_oauth_flows: dict[str, tuple] = {}
 
 # ─── Logger ─────────────────────────────────────────────────────────────────
 log = logging.getLogger("lsd")
@@ -134,9 +147,12 @@ class State:
                 d = json.loads(self.path.read_text(encoding="utf-8"))
                 d.setdefault("completed", {})
                 d.setdefault("failed", {})
+                d.setdefault("youtube_completed", {})
+                d.setdefault("youtube_failed", {})
                 return d
             except json.JSONDecodeError: pass
-        return {"completed": {}, "failed": {}}
+        return {"completed": {}, "failed": {},
+                "youtube_completed": {}, "youtube_failed": {}}
 
     def _save_unlocked(self):
         tmp = self.path.with_suffix(".tmp")
@@ -173,13 +189,115 @@ class State:
         with self._lock:
             self._data["failed"] = {}
             self._save_unlocked()
+    @property
+    def youtube_completed(self):
+        with self._lock: return dict(self._data["youtube_completed"])
+    @property
+    def youtube_failed(self):
+        with self._lock: return dict(self._data["youtube_failed"])
+    def is_youtube_completed(self, tid):
+        with self._lock: return tid in self._data["youtube_completed"]
+    def mark_youtube_completed(self, tid, video_id):
+        with self._lock:
+            self._data["youtube_completed"][tid] = {
+                "video_id": video_id,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._data["youtube_failed"].pop(tid, None)
+            self._save_unlocked()
+    def mark_youtube_failed(self, tid, error):
+        with self._lock:
+            existing = self._data["youtube_failed"].get(tid, {})
+            self._data["youtube_failed"][tid] = {
+                "error": error,
+                "attempts": existing.get("attempts", 0) + 1,
+                "last_attempt": datetime.now(timezone.utc).isoformat(),
+            }
+            self._save_unlocked()
+    def reset_youtube(self):
+        with self._lock:
+            self._data["youtube_completed"] = {}
+            self._data["youtube_failed"] = {}
+            self._save_unlocked()
     def reset_all(self):
         with self._lock:
-            self._data = {"completed": {}, "failed": {}}
+            self._data = {"completed": {}, "failed": {},
+                          "youtube_completed": {}, "youtube_failed": {}}
             self._save_unlocked()
 
 state = State(STATE_PATH)
 youtube_cache = YoutubeSearchCache(DATA_DIR / "youtube_cache.json")
+
+
+# ─── YouTube OAuth helpers ───────────────────────────────────────────────
+def get_youtube_credentials() -> Optional[Credentials]:
+    if not YOUTUBE_TOKEN_PATH.exists():
+        return None
+    try:
+        creds = Credentials.from_authorized_user_file(
+            str(YOUTUBE_TOKEN_PATH), YOUTUBE_SCOPES)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            YOUTUBE_TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+        if creds and creds.valid:
+            return creds
+    except Exception:
+        pass
+    return None
+
+
+def get_youtube_service():
+    creds = get_youtube_credentials()
+    if not creds:
+        raise ValueError("YouTube no autenticado")
+    return build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+
+PLAYLIST_NAME = "Spotify to Youtube"
+
+
+def get_or_create_playlist(youtube) -> str:
+    if YOUTUBE_PLAYLIST_PATH.exists():
+        try:
+            pid = json.loads(YOUTUBE_PLAYLIST_PATH.read_text(encoding="utf-8"))["id"]
+            youtube.playlists().list(id=pid, part="id").execute()
+            return pid
+        except Exception:
+            YOUTUBE_PLAYLIST_PATH.unlink(missing_ok=True)
+    next_page = None
+    while True:
+        resp = youtube.playlists().list(
+            part="snippet", mine=True, maxResults=50,
+            pageToken=next_page).execute()
+        for p in resp.get("items", []):
+            if p["snippet"]["title"] == PLAYLIST_NAME:
+                pid = p["id"]
+                YOUTUBE_PLAYLIST_PATH.write_text(
+                    json.dumps({"id": pid,
+                                "created_at": datetime.now(timezone.utc).isoformat()}),
+                    encoding="utf-8",
+                )
+                return pid
+        next_page = resp.get("nextPageToken")
+        if not next_page:
+            break
+    playlist = youtube.playlists().insert(
+        part="snippet,status",
+        body={
+            "snippet": {
+                "title": PLAYLIST_NAME,
+                "description": "Canciones sincronizadas desde Spotify",
+            },
+            "status": {"privacyStatus": "private"},
+        }
+    ).execute()
+    pid = playlist["id"]
+    YOUTUBE_PLAYLIST_PATH.write_text(
+        json.dumps({"id": pid,
+                     "created_at": datetime.now(timezone.utc).isoformat()}),
+        encoding="utf-8",
+    )
+    return pid
 
 
 # ─── Sync orchestrator ──────────────────────────────────────────────────────
@@ -244,6 +362,7 @@ class SyncManager:
         with self._lock: self.current = label
 
 sync = SyncManager()
+youtube_sync = SyncManager()
 
 
 # ─── Spotify track resolver (no API, just public pages) ─────────────────────
@@ -475,10 +594,11 @@ def score_match(video: dict, track: dict) -> float:
 
     if "official audio" in title or "official video" in title: s += 10
     elif "lyric" in title: s += 5
+    if " - topic" in title: s += 15
 
     if "cover" in title and "cover" not in name: s -= 20
     if "remix" in title and "remix" not in name: s -= 15
-    if "live" in title and "live" not in name: s -= 10
+    if "live" in title and "live" not in name: s -= 40
     if "reaction" in title or "review" in title: s -= 50
     if ("karaoke" in title or "instrumental" in title) and \
        "karaoke" not in name and "instrumental" not in name: s -= 30
@@ -489,25 +609,29 @@ def score_match(video: dict, track: dict) -> float:
 def find_best(track: dict) -> Optional[dict]:
     artist = track["artists"][0] if track["artists"] else ""
     name = track["name"]
-    query = f"{artist} {name}".strip() or name
+    query = f"{artist} {name} official audio".strip() or name
 
     if artist and name:
         cached = youtube_cache.get(artist, name)
         if cached:
             return cached
 
-    results = yt_search(query, n=1)
+    results = yt_search(query, n=5)
     if results:
-        result = results[0]
+        scored = [(score_match(v, track), v) for v in results]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best = scored[0][1]
         if artist and name:
-            youtube_cache.set(artist, name, result)
-        return result
+            youtube_cache.set(artist, name, best)
+        return best
 
     if name != query:
         sync.emit_log(f"  ↻ sin resultados con artista, probando solo nombre...", "info")
-        results = yt_search(name, n=1)
+        results = yt_search(name, n=5)
         if results:
-            return results[0]
+            scored = [(score_match(v, track), v) for v in results]
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return scored[0][1]
 
     return None
 
@@ -644,10 +768,8 @@ def download_audio(video: dict, out_no_ext: Path,
     if final.exists():
         return final
 
-    time.sleep(random.uniform(0.5, 2.0))
-
-    clients = ["tv_simply", "tv_embedded", "web_embedded", "ios", "mweb",
-               "web_safari", "android_vr", "web"]
+    clients = ["ios", "web", "mweb", "tv_simply",
+               "tv_embedded", "web_embedded", "web_safari"]
     err = _ytdlp_try_clients(url, out_no_ext, audio_format, audio_quality, clients)
     if err is None:
         return final if final.exists() else _locate_downloaded(out_no_ext, audio_format)
@@ -1160,6 +1282,170 @@ def check_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+# ─── YouTube sync ───────────────────────────────────────────────────────────
+_thread_local = threading.local()
+
+
+def _yt_service(creds: Credentials):
+    if not hasattr(_thread_local, "youtube"):
+        _thread_local.youtube = build(
+            "youtube", "v3", credentials=creds, cache_discovery=False)
+    return _thread_local.youtube
+
+
+def add_to_youtube_playlist(track: dict, creds, playlist_id: str) -> str:
+    tid = track["id"]
+    name = track["name"]
+    artist = track["artists"][0] if track["artists"] else ""
+    label = f"{artist} - {name}".strip(" -")
+
+    if state.is_youtube_completed(tid):
+        return f"SKIP {label}"
+
+    youtube_sync.current = label
+    youtube_sync.emit_status()
+
+    _check_stop()
+    video = find_best(track)
+    if not video:
+        state.mark_youtube_failed(tid, "no se encontró video en YouTube")
+        return f"FAIL {label}: sin video"
+
+    _check_stop()
+    youtube_sync.emit_log(f"  🎵 Agregando: {video.get('title', '?')}", "info")
+
+    youtube = _yt_service(creds)
+    last_err: Optional[Exception] = None
+    for attempt in range(3):
+        _check_stop()
+        try:
+            time.sleep(random.uniform(0.3, 1.0))
+            youtube.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {
+                            "kind": "youtube#video",
+                            "videoId": video["id"],
+                        },
+                    }
+                }
+            ).execute()
+            state.mark_youtube_completed(tid, video["id"])
+            return f"OK {label}"
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            if "playlist not found" in err_str:
+                YOUTUBE_PLAYLIST_PATH.unlink(missing_ok=True)
+                playlist_id = get_or_create_playlist(youtube)
+                continue
+            is_retryable = any(s in err_str for s in (
+                "service_unavailable", "rate limit", "quota", "429", "403",
+                "500", "503", "ssl", "timeout", "connection",
+            ))
+            if is_retryable and attempt < 2:
+                wait = (attempt + 1) * 3
+                youtube_sync.emit_log(
+                    f"  ⏳ reintento {attempt + 1}/3 en {wait}s...", "info")
+                time.sleep(wait)
+                continue
+            break
+
+    state.mark_youtube_failed(tid, str(last_err))
+    return f"FAIL {label}: {last_err}"
+
+
+def run_sync_youtube():
+    try:
+        creds = get_youtube_credentials()
+        if not creds:
+            raise ValueError("YouTube no autenticado")
+        playlist_id = get_or_create_playlist(
+            build("youtube", "v3", credentials=creds, cache_discovery=False))
+    except Exception as e:
+        youtube_sync.emit_log(f"❌ Error conectando con YouTube: {e}", "error")
+        return
+
+    youtube_sync.is_running = True
+    youtube_sync.should_stop = False
+    youtube_sync.processed = youtube_sync.ok = 0
+    youtube_sync.failed = youtube_sync.skipped = 0
+
+    all_songs = load_songs()
+    songs = [s for s in all_songs if not state.is_youtube_completed(s["id"])]
+    youtube_sync.total = len(songs)
+    youtube_sync.emit_status()
+
+    if not songs:
+        youtube_sync.emit_log("✅ Todas las canciones ya están en la playlist.", "success")
+        youtube_sync.is_running = False
+        youtube_sync.emit_status()
+        youtube_sync.emit("done", {})
+        return
+
+    youtube_sync.emit_log(f"📤 Agregando {len(songs)} canciones a playlist de YouTube...", "info")
+
+    def process_one(track):
+        if youtube_sync.should_stop:
+            return None
+        try:
+            return add_to_youtube_playlist(track, creds, playlist_id)
+        except StopException:
+            return None
+        except Exception as e:
+            state.mark_youtube_failed(track["id"], f"unexpected: {e}")
+            return f"FAIL {track.get('name','?')}: {e}"
+
+    executor = ThreadPoolExecutor(max_workers=5)
+    try:
+        futures = {executor.submit(process_one, track): track for track in songs}
+        for future in as_completed(futures):
+            if youtube_sync.should_stop:
+                youtube_sync.emit_log("⏹  Detenido por el usuario.", "warn")
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+            try:
+                result = future.result()
+            except StopException:
+                continue
+            except CancelledError:
+                continue
+            except Exception as e:
+                result = f"FAIL: {e}"
+
+            if result is None:
+                continue
+            if result.startswith("OK"):
+                youtube_sync.increment_ok()
+                youtube_sync.emit_log(f"  ✓ {result[3:]}", "success")
+            elif result.startswith("SKIP"):
+                youtube_sync.increment_skipped()
+                youtube_sync.emit_log(f"  ↷ {result[5:]}", "muted")
+            else:
+                youtube_sync.increment_failed()
+                youtube_sync.emit_log(f"  ✗ {result[5:]}", "error")
+
+            with youtube_sync._lock:
+                youtube_sync.processed = (youtube_sync.ok +
+                                          youtube_sync.failed +
+                                          youtube_sync.skipped)
+            youtube_sync.emit_status()
+    finally:
+        executor.shutdown(wait=not youtube_sync.should_stop)
+
+    youtube_sync.emit_log(
+        f"⏱  Playlist actualizada: {youtube_sync.ok} agregadas / "
+        f"{youtube_sync.failed} fallidas / {youtube_sync.skipped} omitidas",
+        "info",
+    )
+    youtube_sync.is_running = False
+    youtube_sync.current = ""
+    youtube_sync.emit_status()
+    youtube_sync.emit("done", {})
+
+
 # ─── Flask app ──────────────────────────────────────────────────────────────
 app = Flask(__name__, template_folder=str(APP_DIR / "templates"),
             static_folder=str(APP_DIR / "static"))
@@ -1349,6 +1635,96 @@ def api_open_folder():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ─── YouTube auth routes ────────────────────────────────────────────────────
+@app.route("/auth/login")
+def auth_login():
+    if not GOOGLE_CLIENT_SECRET_PATH.exists():
+        return jsonify({"error": "client_secret.json no encontrado en static/"}), 500
+    flow = Flow.from_client_secrets_file(
+        str(GOOGLE_CLIENT_SECRET_PATH),
+        scopes=YOUTUBE_SCOPES,
+        redirect_uri=url_for("auth_callback", _external=True),
+    )
+    auth_url, state_val = flow.authorization_url(prompt="consent")
+    google_oauth_flows[state_val] = (flow, time.time())
+    return redirect(auth_url)
+
+
+@app.route("/auth/callback")
+def auth_callback():
+    state_param = request.args.get("state")
+    if not state_param or state_param not in google_oauth_flows:
+        return "Error: state inválido. Intenta de nuevo.", 400
+    flow, _ = google_oauth_flows.pop(state_param)
+    flow.fetch_token(authorization_response=request.url)
+    YOUTUBE_TOKEN_PATH.write_text(flow.credentials.to_json(), encoding="utf-8")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/auth/status")
+def auth_status():
+    creds = get_youtube_credentials()
+    if not creds:
+        return jsonify({"connected": False})
+    try:
+        youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        res = youtube.channels().list(part="snippet", mine=True).execute()
+        email = res["items"][0]["snippet"]["title"]
+        return jsonify({"connected": True, "email": email})
+    except Exception:
+        return jsonify({"connected": True, "email": "desconocido"})
+
+
+@app.route("/auth/logout", methods=["POST"])
+def auth_logout():
+    YOUTUBE_TOKEN_PATH.unlink(missing_ok=True)
+    YOUTUBE_PLAYLIST_PATH.unlink(missing_ok=True)
+    state.reset_youtube()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/sync-youtube/start", methods=["POST"])
+def api_sync_youtube_start():
+    if youtube_sync.is_running:
+        return jsonify({"error": "ya hay una sincronización en curso"}), 409
+    if not get_youtube_credentials():
+        return jsonify({"error": "YouTube no conectado. Ve a Configuración."}), 400
+    if len(load_songs()) == 0:
+        return jsonify({"error": "no hay lista de canciones cargada"}), 400
+    threading.Thread(target=run_sync_youtube, daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/sync-youtube/stop", methods=["POST"])
+def api_sync_youtube_stop():
+    youtube_sync.should_stop = True
+    return jsonify({"ok": True})
+
+
+@app.route("/api/sync-youtube/status")
+def api_sync_youtube_status():
+    return jsonify(youtube_sync.snapshot())
+
+
+@app.route("/api/sync-youtube/stream")
+def api_sync_youtube_stream():
+    q = youtube_sync.subscribe()
+    def gen():
+        try:
+            yield f"data: {json.dumps({'type': 'status', **youtube_sync.snapshot()})}\n\n"
+            while True:
+                try:
+                    evt = q.get(timeout=15)
+                    yield f"data: {json.dumps(evt)}\n\n"
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            youtube_sync.unsubscribe(q)
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Accel-Buffering": "no"})
 
 
 # ─── Boot ───────────────────────────────────────────────────────────────────

@@ -92,6 +92,7 @@ code {
 .card.warn { border-color: var(--warn); background: rgba(255,161,22,0.06); }
 .card.center { text-align: center; }
 .big-emoji { font-size: 56px; margin: 8px 0; }
+.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 
 /* Wizard steps */
 .steps {
