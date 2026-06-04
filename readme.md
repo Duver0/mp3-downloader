@@ -107,25 +107,61 @@ Ejecutados en la consola del navegador mientras el scraper corre:
 
 ## Sincronizar a YouTube (opcional)
 
-Puedes agregar tus canciones a una playlist privada de YouTube en vez de descargarlas como MP3.
+Puedes agregar tus canciones a una playlist privada de YouTube sin límite de cuota. Soporta dos métodos de autenticación que se usan en conjunto:
 
-### Configurar Google Cloud
+1. **OAuth** (múltiples proyectos Google Cloud) — se rotan automáticamente al agotar cuota
+2. **Cookies** — sin cuota, ilimitado
 
-1. Ve a [Google Cloud Console](https://console.cloud.google.com) → crea un proyecto nuevo
-2. **APIs & Services → Library** → busca y habilita **YouTube Data API v3**
-3. **Credentials → Create Credentials → OAuth 2.0 Client ID**
-   - Tipo: **Web application**
-   - Authorized redirect URIs: `http://localhost:8080/auth/callback`
-4. Descarga el JSON de credenciales y guárdalo como `static/client_secret.json`
+### Método A — OAuth (múltiples proyectos)
 
-> ⚠️ `static/client_secret.json` no se borra con el botón "Limpiar todo" de la app, a diferencia de los archivos en `data/`.
+1. Ve a [Google Cloud Console](https://console.cloud.google.com) → crea **uno o más** proyectos
+2. En cada proyecto: **APIs & Services → Library** → habilita **YouTube Data API v3**
+3. **Credentials → Create Credentials → OAuth 2.0 Client ID** (tipo Web application, redirect URI: `http://localhost:8080/auth/callback`)
+4. Descarga cada JSON y guárdalo en `static/client_secrets/` como:
+   ```
+   static/client_secrets/
+   ├── client_secret_1.json
+   ├── client_secret_2.json
+   └── client_secret_3.json   ← (los que quieras)
+   ```
+5. Abre la app → Dashboard → haz clic en **"Conectar proyecto 1"**, **"Conectar proyecto 2"**, etc.
+6. Haz clic en **"📤 Sincronizar a playlist"**
+7. La app usa cada proyecto hasta agotar su cuota, luego cambia al siguiente automáticamente
+
+> ⚠️ `static/client_secrets/*.json` está en `.gitignore`. No se sube al repositorio.
+
+### Método B — Cookies de YouTube
+
+Sin límite de cuota. Exporta las cookies de tu sesión de YouTube usando una extensión como:
+
+- [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) (Chrome)
+- [cookies.txt export](https://addons.mozilla.org/es/firefox/addon/cookies-txt/) (Firefox)
+
+Guarda el archivo como `static/cookies/youtube_cookies.txt` en **formato Netscape**:
+
+```
+.youtube.com	TRUE	/	TRUE	1712345678	__Secure-3PSAPISID	valor_hash
+.youtube.com	TRUE	/	TRUE	1712345678	__Secure-3PSID	valor_hash
+...
+```
+
+La app lo detecta automáticamente y lo usa como fallback cuando todos los proyectos OAuth agotan su cuota.
+
+### Orden de prioridad
+
+```
+1. OAuth Proyecto 1  → quotaExceeded?
+2. OAuth Proyecto 2  → quotaExceeded?
+   ...
+N. Cookies           → sin límite de cuota
+```
 
 ### Usar
 
 1. Abre la app → Dashboard
-2. Haz clic en **"🔗 Conectar YouTube"** → autoriza en el navegador
-3. Una vez conectado, haz clic en **"📤 Sincronizar a playlist"**
-4. La app crea una playlist privada "Liked Songs" y agrega cada canción usando el mejor video encontrado en YouTube
+2. Conecta al menos un proyecto OAuth **o** agrega cookies
+3. Haz clic en **"📤 Sincronizar a playlist"**
+4. La app crea una playlist privada **"Spotify to Youtube"** y agrega cada canción
 
 ---
 

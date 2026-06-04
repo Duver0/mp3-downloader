@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 .env
 /data/
-/downloads/static/client_secret.json
+/downloads/static/client_secrets/*.json
+static/cookies/*.txt

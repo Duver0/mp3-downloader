@@ -49,11 +49,12 @@
               <h2>YouTube Playlist</h2>
               <div id="yt-auth-section">
                 <p class="muted" id="yt-status-text">Verificando conexión...</p>
+                <div id="yt-projects" class="yt-projects" style="margin-top:8px"></div>
+                <p class="muted" id="yt-cookies-status" style="margin-top:4px;font-size:13px"></p>
               </div>
               <div class="actions" id="yt-actions">
-                <button id="btn-yt-connect" class="btn ghost">🔗 Conectar YouTube</button>
                 <button id="btn-yt-sync" class="btn primary big" hidden>📤 Sincronizar a playlist</button>
-                <button id="btn-yt-logout" class="btn ghost" hidden>Desconectar</button>
+                <button id="btn-yt-logout" class="btn ghost" hidden>Desconectar todo</button>
               </div>
             </div>
 
@@ -201,17 +202,40 @@ async function checkYtAuth() {
   const r = await fetch('/auth/status');
   const d = await r.json();
   const statusText = $('yt-status-text');
-  const connectBtn = $('btn-yt-connect');
   const syncBtn = $('btn-yt-sync');
   const logoutBtn = $('btn-yt-logout');
-  if (d.connected) {
-    statusText.innerHTML = '✅ Conectado: ' + escapeHtml(d.email);
-    connectBtn.hidden = true;
+  const projectsEl = $('yt-projects');
+  const cookiesEl = $('yt-cookies-status');
+
+  let html = '';
+  let anyConnected = false;
+  for (let i = 0; i < d.total_projects; i++) {
+    const p = d.projects[i];
+    if (p.connected) {
+      anyConnected = true;
+      html += `<span style="color:var(--success);font-size:13px">✅ Proyecto ${i+1}</span> `;
+    } else {
+      html += `<a href="/auth/login?project=${i}" style="font-size:13px">🔗 Conectar proyecto ${i+1}</a> `;
+    }
+  }
+  projectsEl.innerHTML = html;
+
+  if (d.cookies_available) {
+    cookiesEl.innerText = '📝 Cookies de YouTube disponibles';
+  } else {
+    cookiesEl.innerText = '';
+  }
+
+  if (anyConnected || d.cookies_available) {
+    statusText.innerHTML = anyConnected
+      ? '✅ ' + d.connected_count + '/' + d.total_projects + ' proyectos conectados'
+      : '📝 Usando cookies';
     syncBtn.hidden = false;
     logoutBtn.hidden = false;
   } else {
-    statusText.innerText = '🔗 Conecta tu cuenta de YouTube';
-    connectBtn.hidden = false;
+    statusText.innerText = d.total_projects
+      ? '🔗 Conecta al menos un proyecto'
+      : '⚠️ No hay client_secrets en static/client_secrets/';
     syncBtn.hidden = true;
     logoutBtn.hidden = true;
   }
@@ -236,9 +260,6 @@ $('btn-retry').addEventListener('click', async () => {
 });
 $('btn-stop').addEventListener('click', async () => {
   await postJSON('/api/sync/stop');
-});
-$('btn-yt-connect').addEventListener('click', () => {
-  location.href = '/auth/login';
 });
 $('btn-yt-sync').addEventListener('click', async () => {
   const r = await postJSON('/api/sync-youtube/start');

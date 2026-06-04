@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
+import hashlib
 import html as html_module
 import json
 import logging
@@ -53,11 +54,39 @@ DATA_DIR.mkdir(exist_ok=True)
 TMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 # ─── YouTube / Google OAuth ─────────────────────────────────────────────
-GOOGLE_CLIENT_SECRET_PATH = APP_DIR / "static" / "client_secret.json"
-YOUTUBE_TOKEN_PATH = DATA_DIR / "youtube_token.json"
+CLIENT_SECRETS_DIR = APP_DIR / "static" / "client_secrets"
+COOKIES_PATH = APP_DIR / "static" / "cookies" / "youtube_cookies.txt"
 YOUTUBE_PLAYLIST_PATH = DATA_DIR / "youtube_playlist_id.json"
 YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube"]
+PLAYLIST_NAME = "Spotify to Youtube"
+INNERTUBE_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 google_oauth_flows: dict[str, tuple] = {}
+
+
+def _list_client_secrets() -> list[Path]:
+    if not CLIENT_SECRETS_DIR.exists():
+        return []
+    return sorted(CLIENT_SECRETS_DIR.glob("client_secret_*.json"))
+
+
+def _token_path(index: int) -> Path:
+    return DATA_DIR / f"youtube_token_{index}.json"
+
+
+def get_youtube_credentials(index: int = 0) -> Optional[Credentials]:
+    path = _token_path(index)
+    if not path.exists():
+        return None
+    try:
+        creds = Credentials.from_authorized_user_file(str(path), YOUTUBE_SCOPES)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            path.write_text(creds.to_json(), encoding="utf-8")
+        if creds and creds.valid:
+            return creds
+    except Exception:
+        pass
+    return None
 
 # ─── Logger ─────────────────────────────────────────────────────────────────
 log = logging.getLogger("lsd")
@@ -229,41 +258,53 @@ state = State(STATE_PATH)
 youtube_cache = YoutubeSearchCache(DATA_DIR / "youtube_cache.json")
 
 
-# ─── YouTube OAuth helpers ───────────────────────────────────────────────
-def get_youtube_credentials() -> Optional[Credentials]:
-    if not YOUTUBE_TOKEN_PATH.exists():
+# ─── YouTube auth helpers (OAuth + cookies) ──────────────────────────────
+def _load_cookies() -> Optional[dict]:
+    if not COOKIES_PATH.exists():
         return None
     try:
-        creds = Credentials.from_authorized_user_file(
-            str(YOUTUBE_TOKEN_PATH), YOUTUBE_SCOPES)
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            YOUTUBE_TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
-        if creds and creds.valid:
-            return creds
+        text = COOKIES_PATH.read_text(encoding="utf-8")
+        cookies: dict[str, str] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("http"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                key, value = parts[5].strip(), parts[6].strip()
+                cookies[key] = value
+        if "__Secure-3PSAPISID" in cookies or "SAPISID" in cookies:
+            return cookies
     except Exception:
         pass
     return None
 
 
-def get_youtube_service():
-    creds = get_youtube_credentials()
-    if not creds:
-        raise ValueError("YouTube no autenticado")
-    return build("youtube", "v3", credentials=creds, cache_discovery=False)
+def _sapisid_hash(cookies: dict) -> str:
+    sapisid = cookies.get("__Secure-3PSAPISID") or cookies.get("SAPISID", "")
+    ts = int(time.time())
+    h = hashlib.sha1(f"{ts} {sapisid} https://www.youtube.com".encode()).hexdigest()
+    return f"SAPISIDHASH {ts}_{h}"
 
 
-PLAYLIST_NAME = "Spotify to Youtube"
+def _innertube(endpoint: str, data: dict, cookies: dict) -> dict:
+    headers = {
+        "Authorization": _sapisid_hash(cookies),
+        "Content-Type": "application/json",
+        "X-YouTube-Client-Name": "1",
+        "X-YouTube-Client-Version": "2.20250101.00.00",
+        "Origin": "https://www.youtube.com",
+    }
+    r = requests.post(
+        f"https://www.youtube.com/youtubei/v1/{endpoint}",
+        params={"key": INNERTUBE_API_KEY},
+        json=data, headers=headers, cookies=cookies, timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
 
 
-def get_or_create_playlist(youtube) -> str:
-    if YOUTUBE_PLAYLIST_PATH.exists():
-        try:
-            pid = json.loads(YOUTUBE_PLAYLIST_PATH.read_text(encoding="utf-8"))["id"]
-            youtube.playlists().list(id=pid, part="id").execute()
-            return pid
-        except Exception:
-            YOUTUBE_PLAYLIST_PATH.unlink(missing_ok=True)
+def _search_playlist_via_oauth(youtube) -> Optional[str]:
     next_page = None
     while True:
         resp = youtube.playlists().list(
@@ -271,32 +312,79 @@ def get_or_create_playlist(youtube) -> str:
             pageToken=next_page).execute()
         for p in resp.get("items", []):
             if p["snippet"]["title"] == PLAYLIST_NAME:
-                pid = p["id"]
-                YOUTUBE_PLAYLIST_PATH.write_text(
-                    json.dumps({"id": pid,
-                                "created_at": datetime.now(timezone.utc).isoformat()}),
-                    encoding="utf-8",
-                )
-                return pid
+                return p["id"]
         next_page = resp.get("nextPageToken")
         if not next_page:
-            break
+            return None
+
+
+def _search_playlist_via_cookies(cookies: dict) -> Optional[str]:
+    data = {
+        "context": {"client": {"clientName": "WEB",
+                                "clientVersion": "2.20250101.00.00"}},
+    }
+    resp = _innertube("playlist/list", data, cookies)
+    for item in resp.get("contents", []):
+        if item.get("title") == PLAYLIST_NAME:
+            return item.get("playlistId")
+    return None
+
+
+def _create_playlist_via_oauth(youtube) -> str:
     playlist = youtube.playlists().insert(
         part="snippet,status",
         body={
-            "snippet": {
-                "title": PLAYLIST_NAME,
-                "description": "Canciones sincronizadas desde Spotify",
-            },
+            "snippet": {"title": PLAYLIST_NAME,
+                         "description": "Canciones sincronizadas desde Spotify"},
             "status": {"privacyStatus": "private"},
         }
     ).execute()
-    pid = playlist["id"]
+    return playlist["id"]
+
+
+def _create_playlist_via_cookies(cookies: dict) -> str:
+    data = {
+        "context": {"client": {"clientName": "WEB",
+                                "clientVersion": "2.20250101.00.00"}},
+        "title": PLAYLIST_NAME,
+        "privacyStatus": "PRIVATE",
+    }
+    resp = _innertube("playlist/create", data, cookies)
+    return resp.get("playlistId") or resp["id"]
+
+
+def _save_playlist_id(pid: str):
     YOUTUBE_PLAYLIST_PATH.write_text(
         json.dumps({"id": pid,
                      "created_at": datetime.now(timezone.utc).isoformat()}),
         encoding="utf-8",
     )
+
+
+def get_or_create_playlist_oauth(youtube) -> str:
+    if YOUTUBE_PLAYLIST_PATH.exists():
+        try:
+            pid = json.loads(YOUTUBE_PLAYLIST_PATH.read_text(encoding="utf-8"))["id"]
+            youtube.playlists().list(id=pid, part="id").execute()
+            return pid
+        except Exception:
+            YOUTUBE_PLAYLIST_PATH.unlink(missing_ok=True)
+    pid = _search_playlist_via_oauth(youtube)
+    if pid:
+        _save_playlist_id(pid)
+        return pid
+    pid = _create_playlist_via_oauth(youtube)
+    _save_playlist_id(pid)
+    return pid
+
+
+def get_or_create_playlist_cookies(cookies: dict) -> str:
+    pid = _search_playlist_via_cookies(cookies)
+    if pid:
+        _save_playlist_id(pid)
+        return pid
+    pid = _create_playlist_via_cookies(cookies)
+    _save_playlist_id(pid)
     return pid
 
 
@@ -1293,7 +1381,76 @@ def _yt_service(creds: Credentials):
     return _thread_local.youtube
 
 
-def add_to_youtube_playlist(track: dict, creds, playlist_id: str) -> str:
+class _AddResult:
+    """Unified result from add_video_* helpers."""
+
+
+def _add_via_oauth(track: dict, creds, playlist_id: str,
+                   video_id: str) -> Optional[Exception]:
+    youtube = _yt_service(creds)
+    for attempt in range(3):
+        try:
+            time.sleep(random.uniform(0.3, 1.0))
+            youtube.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {
+                            "kind": "youtube#video", "videoId": video_id,
+                        },
+                    }
+                }
+            ).execute()
+            return None
+        except Exception as e:
+            err_str = str(e).lower()
+            if "playlist not found" in err_str:
+                YOUTUBE_PLAYLIST_PATH.unlink(missing_ok=True)
+                playlist_id = get_or_create_playlist_oauth(youtube)
+                continue
+            is_retryable = any(s in err_str for s in (
+                "service_unavailable", "quota", "429", "403",
+                "500", "503", "ssl", "timeout", "connection",
+                "backendError", "internalError",
+            ))
+            if is_retryable and attempt < 2:
+                time.sleep((attempt + 1) * 3)
+                continue
+            return e
+    return e
+
+
+def _add_via_cookies(cookies: dict, playlist_id: str,
+                     video_id: str) -> Optional[Exception]:
+    for attempt in range(3):
+        try:
+            time.sleep(random.uniform(0.3, 1.0))
+            data = {
+                "context": {"client": {"clientName": "WEB",
+                                        "clientVersion": "2.20250101.00.00"}},
+                "playlistId": playlist_id,
+                "actions": [{
+                    "action": "ACTION_ADD_VIDEO",
+                    "addedVideoId": video_id,
+                }],
+            }
+            _innertube("playlist/edit", data, cookies)
+            return None
+        except Exception as e:
+            err_str = str(e).lower()
+            if "playlist not found" in err_str:
+                YOUTUBE_PLAYLIST_PATH.unlink(missing_ok=True)
+                playlist_id = get_or_create_playlist_cookies(cookies)
+                continue
+            if attempt < 2:
+                time.sleep((attempt + 1) * 3)
+                continue
+            return e
+    return e
+
+
+def _process_song(track: dict, playlist_id: str) -> str:
     tid = track["id"]
     name = track["name"]
     artist = track["artists"][0] if track["artists"] else ""
@@ -1314,56 +1471,74 @@ def add_to_youtube_playlist(track: dict, creds, playlist_id: str) -> str:
     _check_stop()
     youtube_sync.emit_log(f"  🎵 Agregando: {video.get('title', '?')}", "info")
 
-    youtube = _yt_service(creds)
+    # ── Determinar auth disponible ──
+    secrets = _list_client_secrets()
+    cookies = _load_cookies()
     last_err: Optional[Exception] = None
-    for attempt in range(3):
-        _check_stop()
-        try:
-            time.sleep(random.uniform(0.3, 1.0))
-            youtube.playlistItems().insert(
-                part="snippet",
-                body={
-                    "snippet": {
-                        "playlistId": playlist_id,
-                        "resourceId": {
-                            "kind": "youtube#video",
-                            "videoId": video["id"],
-                        },
-                    }
-                }
-            ).execute()
+
+    # Try OAuth projects in order
+    for idx in range(len(secrets)):
+        creds = get_youtube_credentials(idx)
+        if not creds:
+            continue
+        err = _add_via_oauth(track, creds, playlist_id, video["id"])
+        if err is None:
             state.mark_youtube_completed(tid, video["id"])
             return f"OK {label}"
-        except Exception as e:
-            last_err = e
-            err_str = str(e).lower()
-            if "playlist not found" in err_str:
-                YOUTUBE_PLAYLIST_PATH.unlink(missing_ok=True)
-                playlist_id = get_or_create_playlist(youtube)
-                continue
-            is_retryable = any(s in err_str for s in (
-                "service_unavailable", "rate limit", "quota", "429", "403",
-                "500", "503", "ssl", "timeout", "connection",
-            ))
-            if is_retryable and attempt < 2:
-                wait = (attempt + 1) * 3
-                youtube_sync.emit_log(
-                    f"  ⏳ reintento {attempt + 1}/3 en {wait}s...", "info")
-                time.sleep(wait)
-                continue
-            break
+        err_str = str(err).lower()
+        if "quota" in err_str or "quotaExceeded" in err_str:
+            _token_path(idx).unlink(missing_ok=True)
+            youtube_sync.emit_log(
+                f"  ⏳ Cuota excedida en proyecto {idx + 1}/{len(secrets)}, "
+                f"cambiando...", "info")
+            continue
+        last_err = err
+        break
 
-    state.mark_youtube_failed(tid, str(last_err))
-    return f"FAIL {label}: {last_err}"
+    # Try cookies as fallback
+    if cookies:
+        err = _add_via_cookies(cookies, playlist_id, video["id"])
+        if err is None:
+            state.mark_youtube_completed(tid, video["id"])
+            return f"OK {label} (cookies)"
+        last_err = err
+
+    err_detail = str(last_err or "sin auth disponible")
+    state.mark_youtube_failed(tid, err_detail)
+    return f"FAIL {label}: {err_detail}"
 
 
 def run_sync_youtube():
+    secrets = _list_client_secrets()
+    cookies = _load_cookies()
+
+    if not secrets and not cookies:
+        youtube_sync.emit_log(
+            "❌ No hay client_secrets en static/client_secrets/ ni cookies "
+            "en static/cookies/youtube_cookies.txt", "error")
+        return
+
+    # Get or create playlist via best available auth
     try:
-        creds = get_youtube_credentials()
-        if not creds:
-            raise ValueError("YouTube no autenticado")
-        playlist_id = get_or_create_playlist(
-            build("youtube", "v3", credentials=creds, cache_discovery=False))
+        playlist_id = None
+        if secrets:
+            for idx in range(len(secrets)):
+                creds = get_youtube_credentials(idx)
+                if creds:
+                    try:
+                        yt = build("youtube", "v3", credentials=creds,
+                                    cache_discovery=False)
+                        playlist_id = get_or_create_playlist_oauth(yt)
+                        break
+                    except Exception:
+                        continue
+        if not playlist_id and cookies:
+            playlist_id = get_or_create_playlist_cookies(cookies)
+        if not playlist_id:
+            youtube_sync.emit_log(
+                "❌ No se pudo obtener/crear la playlist. "
+                "Conecta al menos un proyecto OAuth o agrega cookies.", "error")
+            return
     except Exception as e:
         youtube_sync.emit_log(f"❌ Error conectando con YouTube: {e}", "error")
         return
@@ -1385,13 +1560,22 @@ def run_sync_youtube():
         youtube_sync.emit("done", {})
         return
 
-    youtube_sync.emit_log(f"📤 Agregando {len(songs)} canciones a playlist de YouTube...", "info")
+    sources = []
+    n_projects = sum(1 for i in range(len(secrets))
+                     if get_youtube_credentials(i))
+    if n_projects:
+        sources.append(f"{n_projects} proyecto(s) OAuth")
+    if cookies:
+        sources.append("cookies")
+    youtube_sync.emit_log(
+        f"📤 Agregando {len(songs)} canciones a playlist de YouTube "
+        f"[{', '.join(sources)}]...", "info")
 
     def process_one(track):
         if youtube_sync.should_stop:
             return None
         try:
-            return add_to_youtube_playlist(track, creds, playlist_id)
+            return _process_song(track, playlist_id)
         except StopException:
             return None
         except Exception as e:
@@ -1640,15 +1824,18 @@ def api_open_folder():
 # ─── YouTube auth routes ────────────────────────────────────────────────────
 @app.route("/auth/login")
 def auth_login():
-    if not GOOGLE_CLIENT_SECRET_PATH.exists():
-        return jsonify({"error": "client_secret.json no encontrado en static/"}), 500
+    project = request.args.get("project", 0, type=int)
+    secrets = _list_client_secrets()
+    if project < 0 or project >= len(secrets):
+        return jsonify({"error": f"project {project} no válido, "
+                        f"hay {len(secrets)} secretos"}), 400
     flow = Flow.from_client_secrets_file(
-        str(GOOGLE_CLIENT_SECRET_PATH),
+        str(secrets[project]),
         scopes=YOUTUBE_SCOPES,
-        redirect_uri=url_for("auth_callback", _external=True),
+        redirect_uri=url_for("auth_callback", _external=True, project=project),
     )
     auth_url, state_val = flow.authorization_url(prompt="consent")
-    google_oauth_flows[state_val] = (flow, time.time())
+    google_oauth_flows[state_val] = (flow, time.time(), project)
     return redirect(auth_url)
 
 
@@ -1657,29 +1844,36 @@ def auth_callback():
     state_param = request.args.get("state")
     if not state_param or state_param not in google_oauth_flows:
         return "Error: state inválido. Intenta de nuevo.", 400
-    flow, _ = google_oauth_flows.pop(state_param)
+    flow, _, project = google_oauth_flows.pop(state_param)
     flow.fetch_token(authorization_response=request.url)
-    YOUTUBE_TOKEN_PATH.write_text(flow.credentials.to_json(), encoding="utf-8")
+    _token_path(project).write_text(flow.credentials.to_json(), encoding="utf-8")
     return redirect(url_for("dashboard"))
 
 
 @app.route("/auth/status")
 def auth_status():
-    creds = get_youtube_credentials()
-    if not creds:
-        return jsonify({"connected": False})
-    try:
-        youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
-        res = youtube.channels().list(part="snippet", mine=True).execute()
-        email = res["items"][0]["snippet"]["title"]
-        return jsonify({"connected": True, "email": email})
-    except Exception:
-        return jsonify({"connected": True, "email": "desconocido"})
+    secrets = _list_client_secrets()
+    projects = []
+    for idx in range(len(secrets)):
+        creds = get_youtube_credentials(idx)
+        if creds:
+            projects.append({"index": idx, "connected": True})
+        else:
+            projects.append({"index": idx, "connected": False})
+    has_cookies = _load_cookies() is not None
+    return jsonify({
+        "projects": projects,
+        "total_projects": len(secrets),
+        "connected_count": sum(1 for p in projects if p["connected"]),
+        "cookies_available": has_cookies,
+    })
 
 
 @app.route("/auth/logout", methods=["POST"])
 def auth_logout():
-    YOUTUBE_TOKEN_PATH.unlink(missing_ok=True)
+    secrets = _list_client_secrets()
+    for idx in range(len(secrets)):
+        _token_path(idx).unlink(missing_ok=True)
     YOUTUBE_PLAYLIST_PATH.unlink(missing_ok=True)
     state.reset_youtube()
     return jsonify({"ok": True})
@@ -1689,8 +1883,19 @@ def auth_logout():
 def api_sync_youtube_start():
     if youtube_sync.is_running:
         return jsonify({"error": "ya hay una sincronización en curso"}), 409
-    if not get_youtube_credentials():
-        return jsonify({"error": "YouTube no conectado. Ve a Configuración."}), 400
+    secrets = _list_client_secrets()
+    cookies = _load_cookies()
+    if not secrets and not cookies:
+        return jsonify({
+            "error": "No hay client_secrets en static/client_secrets/ "
+                     "ni cookies en static/cookies/youtube_cookies.txt"
+        }), 400
+    any_connected = any(get_youtube_credentials(i) for i in range(len(secrets)))
+    if not any_connected and not cookies:
+        return jsonify({
+            "error": "Ningún proyecto OAuth conectado y sin cookies. "
+                     "Conecta al menos un proyecto o agrega cookies."
+        }), 400
     if len(load_songs()) == 0:
         return jsonify({"error": "no hay lista de canciones cargada"}), 400
     threading.Thread(target=run_sync_youtube, daemon=True).start()
